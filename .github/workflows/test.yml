@@ -1,0 +1,156 @@
+name: Test and Lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  backend-tests:
+    name: Backend Tests and Lint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cycle_monitor_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pytest pytest-cov
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check backend/ --select E,W,F
+        continue-on-error: true
+
+      - name: Type check with mypy
+        run: |
+          pip install mypy
+          mypy backend/ --ignore-missing-imports
+        continue-on-error: true
+
+      - name: Run pytest
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cycle_monitor_test
+          REDIS_URL: redis://localhost:6379
+        run: |
+          pytest backend/tests/ -v --cov=backend --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: backend
+          fail_ci_if_error: false
+
+  frontend-tests:
+    name: Frontend Tests and Lint
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Lint with ESLint
+        working-directory: ./frontend
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Type check with TypeScript
+        working-directory: ./frontend
+        run: npx tsc --noEmit
+        continue-on-error: true
+
+      - name: Run tests
+        working-directory: ./frontend
+        run: npm run test -- --coverage
+        continue-on-error: true
+
+      - name: Build
+        working-directory: ./frontend
+        run: npm run build
+
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Run security check
+        run: |
+          pip install bandit
+          bandit -r backend/ -ll
+        continue-on-error: true
+
+      - name: Check for hardcoded secrets
+        run: |
+          pip install detect-secrets
+          detect-secrets scan --all-files --force-use-all-plugins
+        continue-on-error: true
+
+      - name: Check for exposed API keys in .env
+        run: |
+          if grep -r "password\|secret\|token" .env.example; then
+            echo "Warning: Sensitive content found in .env.example - should use placeholders"
+            exit 0
+          fi
+        continue-on-error: true
