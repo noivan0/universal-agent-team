@@ -50,3 +50,4 @@ logs/
 .pytest_cache/
 .coverage
 .git.backup/
+.env
