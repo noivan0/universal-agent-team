@@ -94,29 +94,29 @@ class TestSimpleProjectWorkflow:
         assert len(specialists) <= 1  # Minimal or no specialists
 
         # Step 3: Architecture phase
+        from artifact_schemas import ComponentSpec, APIEndpoint
         arch_update = StateUpdate(
             architecture_artifacts=ArchitectureArtifacts(
                 system_design="Simple monolithic architecture: React frontend + FastAPI backend + SQLite",
                 component_specs={
-                    "TodoApp": {
-                        "type": "React.FC",
-                        "props": ["todos"],
-                        "state": ["todos", "loading"]
-                    },
-                    "TodoList": {
-                        "type": "React.FC",
-                        "props": ["todos", "onDelete"],
-                    },
-                    "TodoItem": {
-                        "type": "React.FC",
-                        "props": ["todo", "onComplete", "onDelete"],
-                    }
+                    "TodoApp": ComponentSpec(
+                        name="TodoApp", description="Root todo application",
+                        props={"todos": "list"}, state=["todos", "loading"],
+                    ),
+                    "TodoList": ComponentSpec(
+                        name="TodoList", description="Renders the todo list",
+                        props={"todos": "list", "onDelete": "callable"},
+                    ),
+                    "TodoItem": ComponentSpec(
+                        name="TodoItem", description="Renders a single todo item",
+                        props={"todo": "dict", "onComplete": "callable", "onDelete": "callable"},
+                    ),
                 },
                 api_specs={
-                    "/api/todos": {"method": "GET", "auth": False},
-                    "/api/todos": {"method": "POST", "auth": False},
-                    "/api/todos/{id}": {"method": "PUT", "auth": False},
-                    "/api/todos/{id}": {"method": "DELETE", "auth": False},
+                    "/api/todos-get": APIEndpoint(path="/api/todos", method="GET", description="List todos"),
+                    "/api/todos-post": APIEndpoint(path="/api/todos", method="POST", description="Create todo"),
+                    "/api/todos-put": APIEndpoint(path="/api/todos/{id}", method="PUT", description="Update todo"),
+                    "/api/todos-delete": APIEndpoint(path="/api/todos/{id}", method="DELETE", description="Delete todo"),
                 },
                 database_schema="todos(id, title, completed, created_at)"
             ),
@@ -293,25 +293,26 @@ class TestComplexProjectWorkflow:
         assert len(specialists) >= 2  # Multiple specialists for complex project
 
         # Step 3: Architecture
+        from artifact_schemas import ComponentSpec, APIEndpoint
         arch_update = StateUpdate(
             architecture_artifacts=ArchitectureArtifacts(
                 system_design="Layered monolithic with clear separation of concerns",
                 component_specs={
-                    "UserDashboard": {"type": "React.FC", "props": ["userId"]},
-                    "ProductCatalog": {"type": "React.FC", "props": ["products"]},
-                    "ShoppingCart": {"type": "React.FC", "props": ["items"]},
-                    "Checkout": {"type": "React.FC", "props": ["total"]},
-                    "OrderHistory": {"type": "React.FC", "props": ["orders"]},
-                    "AdminPanel": {"type": "React.FC", "props": ["admin"]},
+                    "UserDashboard": ComponentSpec(name="UserDashboard", description="User dashboard", props={"userId": "str"}),
+                    "ProductCatalog": ComponentSpec(name="ProductCatalog", description="Product listing", props={"products": "list"}),
+                    "ShoppingCart": ComponentSpec(name="ShoppingCart", description="Cart view", props={"items": "list"}),
+                    "Checkout": ComponentSpec(name="Checkout", description="Checkout flow", props={"total": "float"}),
+                    "OrderHistory": ComponentSpec(name="OrderHistory", description="Past orders", props={"orders": "list"}),
+                    "AdminPanel": ComponentSpec(name="AdminPanel", description="Admin interface", props={"admin": "bool"}),
                 },
                 api_specs={
-                    "/api/auth/login": {"method": "POST"},
-                    "/api/users/{id}": {"method": "GET"},
-                    "/api/products": {"method": "GET"},
-                    "/api/products": {"method": "POST", "admin": True},
-                    "/api/orders": {"method": "GET"},
-                    "/api/orders": {"method": "POST"},
-                    "/api/payments": {"method": "POST"},
+                    "/api/auth/login": APIEndpoint(path="/api/auth/login", method="POST", description="Login"),
+                    "/api/users/{id}": APIEndpoint(path="/api/users/{id}", method="GET", description="Get user"),
+                    "/api/products-get": APIEndpoint(path="/api/products", method="GET", description="List products"),
+                    "/api/products-post": APIEndpoint(path="/api/products", method="POST", description="Create product"),
+                    "/api/orders-get": APIEndpoint(path="/api/orders", method="GET", description="List orders"),
+                    "/api/orders-post": APIEndpoint(path="/api/orders", method="POST", description="Create order"),
+                    "/api/payments": APIEndpoint(path="/api/payments", method="POST", description="Process payment"),
                 },
                 database_schema=(
                     "users, products, orders, order_items, payments, "

@@ -26,7 +26,7 @@ Example:
 import logging
 from typing import Callable, Optional
 from fastapi import FastAPI
-from fastapi.middleware.gzip import GZIPMiddleware
+from fastapi.middleware.gzip import GZipMiddleware as GZIPMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -312,6 +312,7 @@ def setup_compression_from_config(
             f"Available: {list(COMPRESSION_CONFIGS.keys())}"
         )
 
-    config = COMPRESSION_CONFIGS[config_name]
+    raw = COMPRESSION_CONFIGS[config_name]
+    config = {"min_size": raw["min_size"], "compression_level": raw["level"]}
     logger.info(f"Using compression profile: {config_name}")
     setup_compression(app, **config)

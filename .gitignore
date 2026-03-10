@@ -51,3 +51,6 @@ logs/
 .coverage
 .git.backup/
 .env
+
+# Generated workflow outputs
+generated/

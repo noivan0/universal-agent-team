@@ -64,7 +64,7 @@ class TestProjectRegistry:
         """Test updating project phase."""
         ProjectRegistry.create_project(
             project_id="test-project-3",
-            user_request="Test"
+            user_request="Test project"
         )
 
         ProjectRegistry.update_project_phase(
@@ -79,7 +79,7 @@ class TestProjectRegistry:
         """Test updating project status."""
         ProjectRegistry.create_project(
             project_id="test-project-4",
-            user_request="Test"
+            user_request="Test project"
         )
 
         ProjectRegistry.update_project_status(
@@ -95,7 +95,7 @@ class TestProjectRegistry:
         """Test setting human approval requirement."""
         ProjectRegistry.create_project(
             project_id="test-project-5",
-            user_request="Test"
+            user_request="Test project"
         )
 
         ProjectRegistry.set_human_approval_needed(
@@ -114,7 +114,7 @@ class TestProjectRegistry:
         for i in range(3):
             ProjectRegistry.create_project(
                 project_id=f"test-project-{100+i}",
-                user_request=f"Test {i}"
+                user_request=f"Test project {i}"
             )
 
         all_projects = ProjectRegistry.get_all_projects()
@@ -124,7 +124,7 @@ class TestProjectRegistry:
         """Test getting project summary."""
         ProjectRegistry.create_project(
             project_id="test-project-summary",
-            user_request="Test"
+            user_request="Test project"
         )
 
         summary = ProjectRegistry.get_project_summary("test-project-summary")
@@ -197,9 +197,13 @@ class TestTaskManager:
     def setup_method(self):
         """Setup for each test."""
         self.project_id = "test-task-project"
+        # Clean up existing tasks to ensure test isolation
+        tasks_dir = TaskManager.get_all_tasks_dir(self.project_id)
+        if tasks_dir.exists():
+            shutil.rmtree(tasks_dir)
         ProjectRegistry.create_project(
             project_id=self.project_id,
-            user_request="Test"
+            user_request="Test project"
         )
 
     def test_create_tasks(self):

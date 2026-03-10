@@ -10,8 +10,10 @@ Provides layered Pydantic models for agent state management with:
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Union
 from pydantic import BaseModel, Field, validator
+
+from artifact_schemas import ComponentSpec, APIEndpoint
 
 
 # ============================================================================
@@ -45,6 +47,33 @@ class ExecutionStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ErrorType(str, Enum):
+    """Classification of agent errors for intelligent retry routing."""
+    TRANSIENT = "transient"          # Network timeout, rate limit → retry with backoff
+    PARSE_ERROR = "parse_error"      # Output format wrong → retry with simplified prompt
+    VALIDATION_ERROR = "validation_error"  # Input state invalid → fix inputs first
+    DETERMINISTIC = "deterministic"  # Same error repeating → escalate to human
+    UNKNOWN = "unknown"              # Unclassified → default retry
+
+
+# ============================================================================
+# Error Models
+# ============================================================================
+
+class AgentError(BaseModel):
+    """Structured error object for intelligent retry routing."""
+    agent_id: str
+    error_type: ErrorType = ErrorType.UNKNOWN
+    message: str
+    suggested_fix: Optional[str] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 
 # ============================================================================
@@ -124,7 +153,7 @@ class AgentExecutionStatus(BaseModel):
     depends_on: Dict[str, int] = Field(default_factory=dict)  # {agent_id: required_version}
     tests_passed: Optional[bool] = None
     last_executed_at: Optional[datetime] = None
-    errors: List[str] = Field(default_factory=list)
+    errors: List[AgentError] = Field(default_factory=list)
 
 
 class ExecutionStatusTracker(BaseModel):
@@ -137,7 +166,7 @@ class ExecutionStatusTracker(BaseModel):
             self.agents[agent_id] = AgentExecutionStatus(
                 agent_id=agent_id,
                 status=status,
-                version=1
+                version=version or 1
             )
         else:
             self.agents[agent_id].status = status
@@ -169,8 +198,8 @@ class PlanningArtifacts(BaseModel):
 class ArchitectureArtifacts(BaseModel):
     """Artifacts produced by Architecture Agent."""
     system_design: Optional[str] = None
-    component_specs: Dict[str, Any] = Field(default_factory=dict)
-    api_specs: Dict[str, Any] = Field(default_factory=dict)
+    component_specs: Dict[str, ComponentSpec] = Field(default_factory=dict)
+    api_specs: Dict[str, APIEndpoint] = Field(default_factory=dict)
     database_schema: Optional[str] = None
     design_system: Optional[str] = None
     deployment_templates: Optional[Dict[str, str]] = None
@@ -285,12 +314,15 @@ class AgentState(BaseModel):
         max_items=10000,  # Reasonable max for long workflows
         description="Agent execution messages (max 10000)"
     )
-    errors: List[str] = Field(
+    errors: List[AgentError] = Field(
         default_factory=list,
         max_items=1000,  # Keep errors more limited
-        description="Error messages (max 1000)"
+        description="Structured error objects (max 1000)"
     )
     retry_count: int = 0
+
+    # ====== Schema Version ======
+    schema_version: str = Field(default="1.0", description="State schema version for migration support")
 
     # ====== Human Interaction ======
     requires_human_approval: bool = False
@@ -313,12 +345,19 @@ class AgentState(BaseModel):
         self.messages.append(message)
         self.metadata.last_modified_at = datetime.now(timezone.utc)
 
-    def add_error(self, error: str):
-        """Add an error to the error log with size check."""
+    def add_error(self, error: Union[str, "AgentError"]):
+        """Add an error to the error log with size check.
+
+        Accepts both plain strings (converted to AgentError automatically)
+        and structured AgentError objects.
+        """
         if len(self.errors) >= 1000:
             # Remove oldest error to make room
             self.errors.pop(0)
-        self.errors.append(error)
+        if isinstance(error, str):
+            self.errors.append(AgentError(agent_id="system", error_type=ErrorType.UNKNOWN, message=error))
+        else:
+            self.errors.append(error)
         self.metadata.last_modified_at = datetime.now(timezone.utc)
 
     def mark_phase_complete(self, phase: AgentPhase, next_phase: Optional[AgentPhase] = None):
@@ -382,7 +421,7 @@ class StateUpdate(BaseModel):
 
     # Communication
     message: Optional[AgentMessage] = None
-    errors: List[str] = Field(default_factory=list)
+    errors: List[Union[AgentError, str]] = Field(default_factory=list)
 
     # Status updates
     task_id: Optional[str] = None

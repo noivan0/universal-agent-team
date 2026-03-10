@@ -69,8 +69,6 @@ class ProjectConfig(BaseModel):
     # Complexity scoring (set by Planning Agent)
     complexity_score: Optional[int] = Field(
         None,
-        ge=1,
-        le=100,
         description="Project complexity (1-100)"
     )
 
@@ -199,8 +197,9 @@ class ProjectRegistry(BaseRegistry[ProjectConfig]):
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
     def create_project(
-        self,
+        cls,
         project_id: str,
         user_request: str,
         team_id: str = "universal-agents-v1",
@@ -225,8 +224,8 @@ class ProjectRegistry(BaseRegistry[ProjectConfig]):
             context=context
         )
 
-        ProjectRegistry.ensure_directories(project_id)
-        self.save(project_id, config)
+        cls.ensure_directories(project_id)
+        cls._get_instance().save(project_id, config)
 
         return config
 

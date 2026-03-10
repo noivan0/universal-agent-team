@@ -109,8 +109,8 @@ class TestAgentStateFactory:
         assert len(state.development.backend.code_files) > 0
 
         # Should have test results
-        assert state.testing_artifacts.total_tests > 0
-        assert state.testing_artifacts.passed_tests > 0
+        assert state.testing_artifacts.test_results["total"] > 0
+        assert state.testing_artifacts.test_results["passed"] > 0
 
         # Should have documentation
         assert state.documentation_artifacts.readme is not None

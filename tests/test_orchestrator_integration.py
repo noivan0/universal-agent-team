@@ -73,17 +73,34 @@ class TestProjectOrchestration:
 
         # Simulate architecture agent work
         from state_models import ArchitectureArtifacts
+        from artifact_schemas import ComponentSpec, APIEndpoint
 
         update = StateUpdate(
             architecture_artifacts=ArchitectureArtifacts(
                 system_design="Monolithic architecture with React frontend",
                 component_specs={
-                    "TodoList": {"type": "React.FC", "props": ["todos"]},
-                    "TodoItem": {"type": "React.FC", "props": ["todo"]}
+                    "TodoList": ComponentSpec(
+                        name="TodoList",
+                        description="Renders the list of todo items",
+                        props={"todos": "list[dict]"},
+                    ),
+                    "TodoItem": ComponentSpec(
+                        name="TodoItem",
+                        description="Renders a single todo item",
+                        props={"todo": "dict"},
+                    ),
                 },
                 api_specs={
-                    "/api/todos": {"method": "GET"},
-                    "/api/todos": {"method": "POST"}
+                    "/api/todos-get": APIEndpoint(
+                        path="/api/todos",
+                        method="GET",
+                        description="Return all todos",
+                    ),
+                    "/api/todos-post": APIEndpoint(
+                        path="/api/todos",
+                        method="POST",
+                        description="Create a new todo",
+                    ),
                 },
                 database_schema="todos table with id, title, completed"
             ),

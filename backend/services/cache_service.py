@@ -117,7 +117,7 @@ class CircuitBreaker:
             with self._lock:
                 self._on_failure()
             logger.error(f"Redis connection error ({func_name}): {e}")
-            raise CircuitBreakerException(f"Redis unavailable: {e}") from e
+            raise CircuitBreakerException(f"Redis connection unavailable: {e}") from e
 
         except redis.TimeoutError as e:
             with self._lock:
@@ -216,6 +216,9 @@ class CacheService:
     - Fallback in-memory cache
     """
 
+    # Fallback cache size limit (class-level constant)
+    _MAX_FALLBACK_CACHE_SIZE = 1000
+
     # Cache key prefixes
     PREFIX_EQUIPMENT = "equipment:"
     PREFIX_CYCLE = "cycle:"
@@ -225,7 +228,7 @@ class CacheService:
     def __init__(self):
         """Initialize Redis connection with circuit breaker and thread safety."""
         try:
-            self.redis_client = redis.from_url(settings.redis_url)
+            self.redis_client = redis.from_url(settings.redis.url)
             # Test connection
             self.redis_client.ping()
             logger.info("Redis connection established")
@@ -239,7 +242,6 @@ class CacheService:
         # Fallback in-memory cache for when Redis is unavailable
         # Uses OrderedDict to support LRU eviction when max size reached
         self._fallback_cache: OrderedDict = OrderedDict()
-        self._MAX_FALLBACK_CACHE_SIZE = 1000  # Prevent unbounded growth
 
         # Thread-safe locks
         self._redis_lock = threading.Lock()  # For Redis operations
@@ -313,6 +315,9 @@ class CacheService:
                         "setex"
                     )
                 logger.debug(f"Set equipment {equipment_id} status to {status}")
+            else:
+                # No Redis client available, use fallback directly
+                self._add_to_fallback_cache(key, data)
         except (CircuitBreakerOpen, CircuitBreakerException):
             logger.warning(f"Circuit breaker open/error, using fallback cache for {key}")
             self._add_to_fallback_cache(key, data)

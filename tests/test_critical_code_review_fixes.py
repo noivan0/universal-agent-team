@@ -174,7 +174,7 @@ class TestApplyStateUpdateValidation:
         result = apply_state_update(agent_state, update)
 
         assert len(result.errors) == 2
-        assert "Error 1" in result.errors
+        assert any(e.message == "Error 1" for e in result.errors)
 
 
 # ============================================================================
@@ -305,7 +305,7 @@ class TestRelevanceCacheThreadSafety:
     def test_relevance_cache_is_thread_safe(self):
         """Relevance cache should use locks for thread safety."""
         assert hasattr(RelevanceCalculator, '_cache_lock')
-        assert isinstance(RelevanceCalculator._cache_lock, threading.RLock)
+        assert isinstance(RelevanceCalculator._cache_lock, type(threading.RLock()))
 
     def test_relevance_cache_is_ordered_dict(self):
         """Relevance cache should use OrderedDict for LRU."""
@@ -441,7 +441,7 @@ class TestBrotliMiddlewareApplication:
         setup_compression(app, min_size=1000, compression_level=6)
 
         # App should have middleware
-        assert len(app.middleware) > 0
+        assert len(app.user_middleware) > 0
 
 
 # ============================================================================

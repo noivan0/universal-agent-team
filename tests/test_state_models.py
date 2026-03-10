@@ -169,44 +169,54 @@ class TestArchitectureArtifacts:
 
     def test_component_specifications(self):
         """Test component specifications in architecture."""
+        from artifact_schemas import ComponentSpec
+
         artifacts = ArchitectureArtifacts()
         artifacts.component_specs = {
-            "UserDashboard": {
-                "type": "React.FC",
-                "props": ["userId", "onUpdate"],
-                "state": ["loading", "userData"],
-                "api_calls": ["/api/users/{id}"]
-            },
-            "TodoList": {
-                "type": "React.FC",
-                "props": ["todos", "onAdd"],
-                "state": ["todos"],
-                "api_calls": ["/api/todos"]
-            }
+            "UserDashboard": ComponentSpec(
+                name="UserDashboard",
+                description="Main user dashboard",
+                props={"userId": "str", "onUpdate": "callable"},
+                state=["loading", "userData"],
+                api_calls=["/api/users/{id}"],
+            ),
+            "TodoList": ComponentSpec(
+                name="TodoList",
+                description="Renders list of todos",
+                props={"todos": "list", "onAdd": "callable"},
+                state=["todos"],
+                api_calls=["/api/todos"],
+            ),
         }
 
         assert len(artifacts.component_specs) == 2
-        assert artifacts.component_specs["UserDashboard"]["type"] == "React.FC"
+        assert artifacts.component_specs["UserDashboard"].name == "UserDashboard"
 
     def test_api_specifications(self):
         """Test API specifications in architecture."""
+        from artifact_schemas import APIEndpoint
+
         artifacts = ArchitectureArtifacts()
         artifacts.api_specs = {
-            "/api/todos": {
-                "method": "GET",
-                "response_schema": {"todos": ["object"]},
-                "authentication": True
-            },
-            "/api/todos": {
-                "method": "POST",
-                "request_schema": {"title": "string"},
-                "response_schema": {"id": "string"},
-                "authentication": True
-            }
+            "/api/todos-get": APIEndpoint(
+                path="/api/todos",
+                method="GET",
+                description="Return all todos",
+                response_schema={"todos": ["object"]},
+                authentication_required=True,
+            ),
+            "/api/todos-post": APIEndpoint(
+                path="/api/todos",
+                method="POST",
+                description="Create a new todo",
+                request_schema={"title": "string"},
+                response_schema={"id": "string"},
+                authentication_required=True,
+            ),
         }
 
-        assert "/api/todos" in artifacts.api_specs
-        assert artifacts.api_specs["/api/todos"]["method"] == "POST"
+        assert "/api/todos-post" in artifacts.api_specs
+        assert artifacts.api_specs["/api/todos-post"].method == "POST"
 
     def test_critical_sections_tracking(self):
         """Test critical sections tracking for context compaction."""
@@ -537,14 +547,16 @@ class TestErrorHandling:
     """Test error handling in state."""
 
     def test_add_error(self):
-        """Test adding errors to state."""
+        """Test adding errors to state (errors are now structured AgentError objects)."""
         state = create_initial_state("test_001", "Test request")
 
         state.add_error("Connection timeout")
         state.add_error("Database unavailable")
 
         assert len(state.errors) == 2
-        assert "Connection timeout" in state.errors
+        # errors are AgentError objects; check the message field
+        assert state.errors[0].message == "Connection timeout"
+        assert state.errors[1].message == "Database unavailable"
 
     def test_error_tracking_updates_timestamp(self):
         """Test that adding errors updates last_modified_at."""
@@ -699,7 +711,7 @@ class TestStateUpdates:
         assert updated_state.messages[0].content == "Planning complete"
 
     def test_apply_error_update(self):
-        """Test applying error updates."""
+        """Test applying error updates (strings are auto-converted to AgentError)."""
         state = create_initial_state("test_001", "Test request")
 
         update = StateUpdate(
@@ -709,7 +721,10 @@ class TestStateUpdates:
         updated_state = apply_state_update(state, update)
 
         assert len(updated_state.errors) == 2
-        assert "Error 1" in updated_state.errors
+        # errors are AgentError objects; plain strings are auto-converted
+        messages = [e.message for e in updated_state.errors]
+        assert "Error 1" in messages
+        assert "Error 2" in messages
 
 
 @pytest.mark.unit

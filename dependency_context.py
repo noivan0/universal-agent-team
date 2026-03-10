@@ -174,7 +174,10 @@ class DependencyGraph:
 
         while completed != target:
             for agent in target - completed:
-                if DependencyGraph.can_execute(agent, completed):
+                # Only require deps that are themselves in the target set
+                deps = DependencyGraph.get_dependencies(agent)
+                relevant_deps = [d for d in deps if d in target]
+                if all(dep in completed for dep in relevant_deps):
                     order.append(agent)
                     completed.add(agent)
                     break

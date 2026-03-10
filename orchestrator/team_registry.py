@@ -172,8 +172,9 @@ class TeamRegistry(BaseRegistry[TeamConfig]):
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
     def create_universal_team(
-        self,
+        cls,
         spec_location: str = "/workspace/agents"
     ) -> TeamConfig:
         """
@@ -249,7 +250,7 @@ class TeamRegistry(BaseRegistry[TeamConfig]):
             }
         )
 
-        self.save("universal-agents-v1", team)
+        cls._get_instance().save("universal-agents-v1", team)
         return team
 
     def update(self, key: str, config: TeamConfig) -> bool:
@@ -345,5 +346,4 @@ class TeamRegistry(BaseRegistry[TeamConfig]):
     def ensure_universal_team():
         """Ensure universal team is registered. Create if missing."""
         if not TeamRegistry.team_exists("universal-agents-v1"):
-            instance = TeamRegistry._get_instance()
-            instance.create_universal_team()
+            TeamRegistry.create_universal_team()

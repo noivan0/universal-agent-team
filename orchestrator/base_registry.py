@@ -167,6 +167,23 @@ class BaseRegistry(ABC, Generic[T]):
             logger.error(f"Failed to save {key}: {e}")
             return False
 
+    def _get_key_from_stem(self, stem: str) -> str:
+        """
+        Reverse _get_config_filename to extract the key from a file stem.
+
+        Args:
+            stem: File stem (filename without extension)
+
+        Returns:
+            Configuration key
+        """
+        sample = self._get_config_filename("__KEY__")
+        # sample is like "__KEY___project.json" → suffix = "_project"
+        suffix = sample.replace("__KEY__", "").replace(".json", "")
+        if suffix and stem.endswith(suffix):
+            return stem[:-len(suffix)]
+        return stem
+
     def list_all(self) -> Dict[str, T]:
         """
         Load all configurations from storage.
@@ -179,7 +196,7 @@ class BaseRegistry(ABC, Generic[T]):
         # Iterate through JSON files in storage directory
         for file_path in self.storage_dir.glob("*.json"):
             try:
-                key = file_path.stem
+                key = self._get_key_from_stem(file_path.stem)
                 config = self.load(key)
                 if config:
                     result[key] = config
@@ -199,6 +216,9 @@ class BaseRegistry(ABC, Generic[T]):
             True if delete successful, False otherwise
         """
         file_path = self.storage_dir / self._get_config_filename(key)
+
+        if not file_path.exists() and key not in self._cache:
+            return False  # Nothing to delete
 
         try:
             if file_path.exists():

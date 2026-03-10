@@ -68,6 +68,7 @@ class ProjectConfigFactory:
     """Factory for creating test ProjectConfig objects."""
 
     counter = 0
+    _epoch = 0
 
     @classmethod
     def create(
@@ -93,7 +94,7 @@ class ProjectConfigFactory:
         """
         cls.counter += 1
         return ProjectConfig(
-            project_id=project_id or f"test_proj_{cls.counter}",
+            project_id=project_id or f"test_proj_e{cls._epoch}_{cls.counter}",
             user_request=user_request or f"Test project {cls.counter}",
             team_id=team_id,
             status=status,
@@ -104,6 +105,7 @@ class ProjectConfigFactory:
     def reset(cls):
         """Reset counter for fresh test runs."""
         cls.counter = 0
+        cls._epoch += 1
 
 
 class AgentStateFactory:
@@ -158,9 +160,9 @@ class AgentStateFactory:
         state.development.backend.code_files = {
             "main.py": "# FastAPI app"
         }
-        state.testing_artifacts.total_tests = 10
-        state.testing_artifacts.passed_tests = 10
-        state.testing_artifacts.coverage_percent = 85.0
+        state.testing_artifacts.test_results = {
+            "total": 10, "passed": 10, "failed": 0, "coverage": 85.0
+        }
         state.documentation_artifacts.readme = "# Project README"
         state.metadata.current_phase = AgentPhase.COMPLETE
         return state
@@ -236,9 +238,9 @@ def complex_project_state():
 
 
 @pytest.fixture
-def planning_phase_state():
+def planning_phase_state(simple_project_state):
     """Create state after planning phase."""
-    state = simple_project_state()
+    state = simple_project_state
     state.planning_artifacts.requirements = (
         "Build a todo app with CRUD operations and user authentication"
     )
@@ -257,34 +259,42 @@ def planning_phase_state():
 
 
 @pytest.fixture
-def architecture_phase_state():
+def architecture_phase_state(planning_phase_state):
     """Create state after architecture phase."""
-    state = planning_phase_state()
+    from artifact_schemas import ComponentSpec, APIEndpoint
+
+    state = planning_phase_state
     state.architecture_artifacts.system_design = (
         "Monolithic architecture with React frontend and FastAPI backend"
     )
     state.architecture_artifacts.component_specs = {
-        "TodoList": {
-            "type": "React.FC",
-            "props": ["todos", "onAdd", "onDelete"],
-            "state": ["todos"]
-        },
-        "TodoItem": {
-            "type": "React.FC",
-            "props": ["todo", "onDelete"],
-            "state": []
-        }
+        "TodoList": ComponentSpec(
+            name="TodoList",
+            description="Renders the todo list",
+            props={"todos": "list", "onAdd": "callable", "onDelete": "callable"},
+            state=["todos"],
+        ),
+        "TodoItem": ComponentSpec(
+            name="TodoItem",
+            description="Renders a single todo",
+            props={"todo": "dict", "onDelete": "callable"},
+            state=[],
+        ),
     }
     state.architecture_artifacts.api_specs = {
-        "/api/todos": {
-            "method": "GET",
-            "response_schema": {"todos": "array"},
-        },
-        "/api/todos": {
-            "method": "POST",
-            "request_schema": {"title": "string"},
-            "response_schema": {"id": "string", "title": "string"}
-        }
+        "/api/todos-get": APIEndpoint(
+            path="/api/todos",
+            method="GET",
+            description="Return all todos",
+            response_schema={"todos": "array"},
+        ),
+        "/api/todos-post": APIEndpoint(
+            path="/api/todos",
+            method="POST",
+            description="Create a new todo",
+            request_schema={"title": "string"},
+            response_schema={"id": "string", "title": "string"},
+        ),
     }
     state.architecture_artifacts.database_schema = (
         "todos table with id, title, completed, user_id"

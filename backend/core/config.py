@@ -166,8 +166,6 @@ class AgentConfig(BaseModel):
     timeout_seconds: int = Field(
         default=300,
         description="Agent execution timeout in seconds",
-        ge=MIN_AGENT_TIMEOUT,
-        le=MAX_AGENT_TIMEOUT,
     )
 
     @field_validator("timeout_seconds")
@@ -221,6 +219,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         validate_assignment=True,
+        extra="ignore",
     )
 
     # Core application settings
@@ -389,14 +388,10 @@ def validate_no_hardcoded_credentials(settings_obj: "Settings") -> None:
 # Load settings at module import time
 settings = Settings()
 
-# Validate settings on import
+# Security validation on import
 try:
-    Settings.model_validate(settings.model_dump())
-    logger.info("Configuration validation passed")
-
-    # Security validation
     validate_no_hardcoded_credentials(settings)
-
+    logger.info("Configuration validation passed")
 except Exception as e:
     logger.error(f"Configuration validation failed: {e}")
     raise

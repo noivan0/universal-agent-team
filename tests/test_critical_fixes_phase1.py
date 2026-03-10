@@ -238,17 +238,14 @@ class TestThreadSafeCacheOperations:
         """Test circuit breaker acquires lock during call."""
         cb = CircuitBreaker()
 
-        # Mock function
+        # Verify the lock is an RLock (reentrant, thread-safe)
+        assert isinstance(cb._lock, type(threading.RLock()))
+
+        # Verify successful call works (lock is used internally)
         mock_func = Mock(return_value="success")
-
-        with patch.object(cb._lock, "__enter__") as mock_enter:
-            with patch.object(cb._lock, "__exit__"):
-                try:
-                    cb.call(mock_func, "test_func")
-                except:
-                    pass  # Lock may not be acquired in test
-
-        # Lock should be acquired (or attempted)
+        result = cb.call(mock_func, "test_func")
+        assert result == "success"
+        mock_func.assert_called_once()
 
     def test_concurrent_cache_reads_are_safe(self):
         """Test multiple threads can read cache simultaneously."""

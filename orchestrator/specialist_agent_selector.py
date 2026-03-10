@@ -144,7 +144,7 @@ class ComplexityFactors:
             score += 12
 
         # Data factors
-        if self.has_database_heavy and self.table_count > 5:
+        if self.has_database_heavy and self.table_count >= 5:
             score += 15
         if self.requires_analytics:
             score += 10
@@ -541,6 +541,10 @@ class SecurityReviewerEvaluator(SpecialistEvaluator):
         factors: "ComplexityFactors",
     ) -> bool:
         """Check if Security Reviewer should be invoked."""
+        # Only apply security-specific logic to the security reviewer agent
+        if specialist.agent_type != SpecialistAgentType.SECURITY_REVIEWER:
+            return True
+
         # Always invoke if complexity meets threshold AND any of these are true:
         if complexity_score < specialist.min_complexity:
             return False

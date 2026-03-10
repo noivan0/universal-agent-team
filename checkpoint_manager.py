@@ -9,9 +9,49 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from state_models import AgentState, StateUpdate
+
+
+# ============================================================================
+# Schema Version & Migration
+# ============================================================================
+
+CURRENT_SCHEMA_VERSION = "1.0"
+
+# Migration functions: {from_version: migration_fn(state_dict) -> state_dict}
+SCHEMA_MIGRATIONS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+    # Pre-1.0 checkpoints (no schema_version field) → 1.0
+    "0.9": lambda data: {**data, "schema_version": "1.0"},
+}
+
+
+def migrate_state(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Migrate a state dict from any older schema version to the current one.
+
+    Args:
+        state_dict: Raw state dictionary loaded from checkpoint
+
+    Returns:
+        State dict at CURRENT_SCHEMA_VERSION
+
+    Raises:
+        ValueError: If no migration path exists for the version
+    """
+    version = state_dict.get("schema_version", "0.9")
+
+    while version != CURRENT_SCHEMA_VERSION:
+        if version not in SCHEMA_MIGRATIONS:
+            raise ValueError(
+                f"No migration path from schema version '{version}' to '{CURRENT_SCHEMA_VERSION}'. "
+                f"Known migrations: {list(SCHEMA_MIGRATIONS.keys())}"
+            )
+        state_dict = SCHEMA_MIGRATIONS[version](state_dict)
+        version = state_dict.get("schema_version", CURRENT_SCHEMA_VERSION)
+
+    return state_dict
 
 
 # ============================================================================
@@ -313,8 +353,8 @@ class StreamingExecutionHandler:
         )
 
         if latest_checkpoint and not latest_checkpoint.is_complete:
-            # Resume from this checkpoint
-            state_dict = latest_checkpoint.state_snapshot
+            # Migrate to current schema before deserializing
+            state_dict = migrate_state(latest_checkpoint.state_snapshot)
             return AgentState(**state_dict)
 
         return None
@@ -396,8 +436,8 @@ class ExecutionResumer:
         if not latest or latest.is_complete:
             return None
 
-        # Reconstruct state from checkpoint
-        state_dict = latest.state_snapshot
+        # Migrate to current schema before deserializing
+        state_dict = migrate_state(latest.state_snapshot)
         return AgentState(**state_dict)
 
     @staticmethod

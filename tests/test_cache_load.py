@@ -342,7 +342,7 @@ class TestPerformanceDegradation:
         # Should not collapse under load
         if len(results_list) > 1:
             worst_case = results_list[-1]["ops_per_sec"]
-            best_case = results_list[0]["ops_per_second"]
+            best_case = results_list[0]["ops_per_sec"]
             # Worst case should still be at least 10% of best case
             assert worst_case > best_case * 0.1, \
                 f"Performance collapsed: {worst_case:.1f} vs {best_case:.1f}"

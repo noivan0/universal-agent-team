@@ -87,7 +87,7 @@ class ComponentSpec(BaseModel):
 class APIEndpoint(BaseModel):
     """Specification for an API endpoint."""
     path: str
-    method: str = Field(..., regex="^(GET|POST|PUT|DELETE|PATCH)$")
+    method: str = Field(..., pattern="^(GET|POST|PUT|DELETE|PATCH)$")
     description: str
     request_schema: Dict[str, Any] = Field(default_factory=dict)
     response_schema: Dict[str, Any] = Field(default_factory=dict)
@@ -220,7 +220,7 @@ class DevelopmentAgentOutput(BaseModel):
 class TestResult(BaseModel):
     """Result of a single test."""
     test_name: str
-    status: str = Field(..., regex="^(passed|failed|skipped)$")
+    status: str = Field(..., pattern="^(passed|failed|skipped)$")
     duration_ms: float
     error_message: Optional[str] = None
 
@@ -228,7 +228,7 @@ class TestResult(BaseModel):
 class BugReport(BaseModel):
     """A bug found during testing."""
     bug_id: str
-    severity: str = Field(..., regex="^(critical|high|medium|low)$")
+    severity: str = Field(..., pattern="^(critical|high|medium|low)$")
     component: str
     description: str
     reproduction_steps: List[str] = Field(default_factory=list)
@@ -239,7 +239,7 @@ class ErrorAnalysis(BaseModel):
     """Analysis of a test/validation failure."""
     root_cause: str  # "frontend_code", "backend_code", "api_contract", "architecture", etc.
     affected_agents: List[str] = Field(default_factory=list)
-    severity: str = Field(..., regex="^(critical|high|medium|low)$")
+    severity: str = Field(..., pattern="^(critical|high|medium|low)$")
     details: Dict[str, Any] = Field(default_factory=dict)
     recommendation: str
 
