@@ -1,0 +1,90 @@
+# Universal Agent Team v1 Configuration
+# =========================================
+# This file defines the default agent team used when no custom team is
+# specified. Edit here to add/remove agents or change dependency edges
+# without modifying Python code.
+
+team_id: "universal-agents-v1"
+name: "Universal Agent Team v1"
+description: "Default team with support for React + FastAPI, and other stacks"
+spec_location: "/workspace/agents"
+
+allow_parallel_execution: true
+max_retries: 3
+checkpoint_enabled: true
+
+agents:
+  - agent_id: "planning"
+    role: "planning"
+    spec_file: "{spec_location}/01-planning-agent.md"
+    description: "Analyze requirements and break into tasks"
+    specializations: []
+
+  - agent_id: "architecture"
+    role: "architecture"
+    spec_file: "{spec_location}/02-architecture-agent.md"
+    description: "Design system architecture and specs"
+    specializations: []
+
+  - agent_id: "frontend"
+    role: "frontend"
+    spec_file: "{spec_location}/03-frontend-agent.md"
+    description: "Generate frontend code"
+    specializations:
+      - "react"
+      - "react-native"
+      - "vue"
+      - "svelte"
+
+  - agent_id: "backend"
+    role: "backend"
+    spec_file: "{spec_location}/04-backend-agent.md"
+    description: "Generate backend code"
+    specializations:
+      - "fastapi"
+      - "node-express"
+      - "django"
+      - "go"
+
+  - agent_id: "contract_validator"
+    role: "validation"
+    spec_file: "{spec_location}/07-contract-validator-agent.md"
+    description: "Validate API contracts"
+    specializations: []
+
+  - agent_id: "qa"
+    role: "qa"
+    spec_file: "{spec_location}/05-backtesting-qa-agent.md"
+    description: "Test and validate code"
+    specializations: []
+
+  - agent_id: "documentation"
+    role: "documentation"
+    spec_file: "{spec_location}/06-documentation-agent.md"
+    description: "Generate documentation"
+    specializations: []
+
+# Dependency graph: {agent_id: [depends_on_agent_ids]}
+# Agents with no dependencies run first (planning).
+# Parallel execution is inferred from agents that share the same dependency set.
+dependencies:
+  planning: []
+  architecture:
+    - planning
+  contract_validator:
+    - architecture
+  frontend:
+    - architecture
+    - contract_validator
+  backend:
+    - architecture
+    - contract_validator
+  qa:
+    - frontend
+    - backend
+  documentation:
+    - planning
+    - architecture
+    - frontend
+    - backend
+    - qa

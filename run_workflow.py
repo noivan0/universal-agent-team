@@ -37,8 +37,11 @@ logging.basicConfig(
 logger = logging.getLogger("workflow_runner")
 
 # ── Imports ───────────────────────────────────────────────────────────────────
-from state_models import create_initial_state, AgentState, AgentPhase, apply_state_update
-from agent_executor import execute_agent, AGENT_RUNNERS
+from state_models import (
+    create_initial_state, AgentState, AgentPhase, apply_state_update,
+    StateUpdate, DocumentationArtifacts, AgentMessage,
+)
+from agent_executor import execute_agent, AGENT_RUNNERS, _filter_bugs
 from agent_bus import reset_bus, get_bus, ContractValidator
 from agent_validators import AgentOutputValidator
 from checkpoint_manager import CheckpointManager, ExecutionCheckpoint, migrate_state
@@ -224,10 +227,7 @@ def _qa_needs_healing(state: AgentState) -> Tuple[bool, List, List[str]]:
     bug_reports = ta.bug_reports or []
     error_analysis = ta.error_analysis or {}
 
-    critical_bugs = [
-        b for b in bug_reports
-        if isinstance(b, dict) and b.get("severity") == "critical"
-    ]
+    critical_bugs = _filter_bugs(bug_reports, severities=["critical"])
 
     restart_needed = error_analysis.get("restart_needed", False)
 
@@ -253,6 +253,25 @@ def _qa_needs_healing(state: AgentState) -> Tuple[bool, List, List[str]]:
 # ============================================================================
 # Self-healing loop
 # ============================================================================
+
+def _apply_heal_result(
+    agent_id: str,
+    update,
+    error: Optional[Exception],
+    state: AgentState,
+    errors_encountered: List,
+    iteration: int,
+) -> AgentState:
+    """Apply a single heal result, logging success or failure."""
+    if error:
+        logger.error(f"  ✗ {agent_id} healing FAILED: {error}")
+        errors_encountered.append((f"{agent_id}_heal_{iteration}", str(error)))
+        return state
+    state = apply_state_update(state, update)
+    if state.messages:
+        logger.info(f"  ✓ {agent_id}: {state.messages[-1].content}")
+    return state
+
 
 def run_healing_loop(state: AgentState, errors_encountered: List) -> AgentState:
     """
@@ -287,23 +306,14 @@ def run_healing_loop(state: AgentState, errors_encountered: List) -> AgentState:
             logger.info(f"  ▶ Healing agent: {agent_id.upper()}")
             try:
                 update = execute_agent(agent_id, state, bug_reports=bug_reports)
-                state = apply_state_update(state, update)
-                if state.messages:
-                    logger.info(f"  ✓ {agent_id}: {state.messages[-1].content}")
+                state = _apply_heal_result(agent_id, update, None, state, errors_encountered, iteration)
             except Exception as exc:
-                logger.error(f"  ✗ {agent_id} healing FAILED: {exc}")
-                errors_encountered.append((f"{agent_id}_heal_{iteration}", str(exc)))
+                state = _apply_heal_result(agent_id, None, exc, state, errors_encountered, iteration)
         else:
             logger.info(f"  ▶ Healing PARALLEL: {' + '.join(a.upper() for a in affected)}")
             results = run_parallel(affected, state, bug_reports=bug_reports)
             for agent_id, update, error in results:
-                if error:
-                    logger.error(f"  ✗ {agent_id} healing FAILED: {error}")
-                    errors_encountered.append((f"{agent_id}_heal_{iteration}", str(error)))
-                else:
-                    state = apply_state_update(state, update)
-                    if state.messages:
-                        logger.info(f"  ✓ {agent_id}: {state.messages[-1].content}")
+                state = _apply_heal_result(agent_id, update, error, state, errors_encountered, iteration)
 
         elapsed_dev = time.time() - t0
         logger.info(f"  Dev healing completed in {elapsed_dev:.1f}s")
@@ -350,8 +360,6 @@ def _generate_fallback_docs(state: AgentState) -> AgentState:
     Used when the Documentation Agent fails (e.g. API quota exhausted).
     Produces a usable README and API reference from already-available state.
     """
-    from state_models import DocumentationArtifacts, AgentMessage, apply_state_update, StateUpdate, AgentPhase
-
     logger.info("[Fallback Docs] Generating minimal docs from state (no LLM)")
 
     req = state.metadata.user_request
@@ -428,7 +436,6 @@ def _generate_fallback_docs(state: AgentState) -> AgentState:
     ]
     deploy_guide = "\n".join(deploy_lines)
 
-    from state_models import StateUpdate
     update = StateUpdate(
         documentation_artifacts=DocumentationArtifacts(
             readme=readme,
@@ -672,7 +679,7 @@ if __name__ == "__main__":
         print("Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN environment variable.")
         sys.exit(1)
 
-    logger.info(f"Using API key: {api_key[:12]}...")
+    logger.info("API key loaded (source: environment or settings file)")
 
     request = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else (
         "Build a Todo List application with user authentication. "

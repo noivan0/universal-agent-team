@@ -11,11 +11,11 @@ Uses BaseRegistry for caching and persistence (Quick Win 3).
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from enum import Enum
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from orchestrator.base_registry import BaseRegistry
 
@@ -52,6 +52,8 @@ class ProjectStatus(str, Enum):
 
 class ProjectConfig(BaseModel):
     """Configuration for a project."""
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+
     project_id: str = Field(..., description="Unique project identifier")
     team_id: str = Field(
         "universal-agents-v1",
@@ -77,7 +79,7 @@ class ProjectConfig(BaseModel):
     current_phase: ProjectPhase = Field(default=ProjectPhase.PLANNING)
 
     # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
@@ -86,12 +88,8 @@ class ProjectConfig(BaseModel):
     requires_human_approval: bool = False
     approval_reason: Optional[str] = None
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-    @validator("project_id")
+    @field_validator("project_id")
+    @classmethod
     def validate_project_id(cls, v):
         if not v or len(v.strip()) == 0:
             raise ValueError("project_id cannot be empty")
@@ -308,9 +306,9 @@ class ProjectRegistry(BaseRegistry[ProjectConfig]):
             if error_message:
                 config.error_message = error_message
             if new_status == ProjectStatus.COMPLETE:
-                config.completed_at = datetime.utcnow()
+                config.completed_at = datetime.now(timezone.utc)
             elif new_status == ProjectStatus.IN_PROGRESS and not config.started_at:
-                config.started_at = datetime.utcnow()
+                config.started_at = datetime.now(timezone.utc)
             ProjectRegistry.save_project_config(config)
 
     @staticmethod

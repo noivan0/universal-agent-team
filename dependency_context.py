@@ -7,6 +7,7 @@ maintaining accuracy and consistency.
 """
 
 import logging
+import threading
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime
@@ -75,6 +76,8 @@ class DependencyGraph:
 
     # Cache for execution order calculations (OrderedDict for LRU eviction)
     _execution_order_cache: OrderedDict[str, List[str]] = OrderedDict()
+    # Lock for thread-safe cache access
+    _cache_lock: threading.Lock = threading.Lock()
     # Track cache invalidation timestamps
     _cache_invalidation_timestamp: Dict[str, float] = {}
 
@@ -133,8 +136,7 @@ class DependencyGraph:
         Called before adding new entries to maintain bounded memory.
         """
         if len(DependencyGraph._execution_order_cache) >= DependencyGraph._MAX_CACHE_SIZE:
-            oldest_key = next(iter(DependencyGraph._execution_order_cache))
-            del DependencyGraph._execution_order_cache[oldest_key]
+            oldest_key, _ = DependencyGraph._execution_order_cache.popitem(last=False)
             logger.debug(
                 f"Cache evicted oldest entry: {oldest_key}. "
                 f"Size: {len(DependencyGraph._execution_order_cache)}"
@@ -161,11 +163,12 @@ class DependencyGraph:
         # Check cache first
         if use_cache:
             cache_key = DependencyGraph._get_cache_key(target_agents)
-            if cache_key in DependencyGraph._execution_order_cache:
-                # Move to end (most recently used)
-                DependencyGraph._execution_order_cache.move_to_end(cache_key)
-                logger.debug(f"Cache hit for execution order: {cache_key}")
-                return DependencyGraph._execution_order_cache[cache_key].copy()
+            with DependencyGraph._cache_lock:
+                if cache_key in DependencyGraph._execution_order_cache:
+                    # Move to end (most recently used)
+                    DependencyGraph._execution_order_cache.move_to_end(cache_key)
+                    logger.debug(f"Cache hit for execution order: {cache_key}")
+                    return DependencyGraph._execution_order_cache[cache_key].copy()
 
         # Perform topological sort
         target = set(target_agents or DependencyGraph.DEPENDENCIES.keys())
@@ -189,9 +192,10 @@ class DependencyGraph:
         # Store in cache if enabled (with LRU eviction)
         if use_cache:
             cache_key = DependencyGraph._get_cache_key(target_agents)
-            DependencyGraph._evict_if_needed()
-            DependencyGraph._execution_order_cache[cache_key] = order.copy()
-            logger.debug(f"Cached execution order: {cache_key} (size: {len(DependencyGraph._execution_order_cache)})")
+            with DependencyGraph._cache_lock:
+                DependencyGraph._evict_if_needed()
+                DependencyGraph._execution_order_cache[cache_key] = order.copy()
+                logger.debug(f"Cached execution order: {cache_key} (size: {len(DependencyGraph._execution_order_cache)})")
 
         return order
 
@@ -202,8 +206,9 @@ class DependencyGraph:
 
         Call this when team configuration changes or dependencies are updated.
         """
-        DependencyGraph._execution_order_cache.clear()
-        DependencyGraph._cache_invalidation_timestamp.clear()
+        with DependencyGraph._cache_lock:
+            DependencyGraph._execution_order_cache.clear()
+            DependencyGraph._cache_invalidation_timestamp.clear()
         logger.info("Execution order cache invalidated")
 
     @staticmethod

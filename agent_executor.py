@@ -15,7 +15,6 @@ Design principles
   chatter between agents (the state IS the shared memory).
 """
 
-import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +34,26 @@ logger = logging.getLogger("agent_executor")
 # ============================================================================
 # Shared helpers
 # ============================================================================
+
+def _filter_bugs(
+    bug_reports: List[Dict[str, Any]],
+    severities: Optional[List[str]] = None,
+    components: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Filter bug reports by severity and/or component substring."""
+    result = []
+    for b in bug_reports:
+        if not isinstance(b, dict):
+            continue
+        if severities and b.get("severity") not in severities:
+            continue
+        if components:
+            comp = b.get("component", "").lower()
+            if not any(c in comp for c in components):
+                continue
+        result.append(b)
+    return result
+
 
 def _build_project_context(state: AgentState) -> str:
     """Compact project context string injected into every agent prompt."""
@@ -346,12 +365,11 @@ def run_frontend_agent(
             snippet = content[:600] + "\n...[truncated]" if len(content) > 600 else content
             context += f"\n### {path}\n```\n{snippet}\n```\n"
 
-        frontend_bugs = [
-            b for b in bug_reports
-            if isinstance(b, dict) and b.get("component", "").lower() in
-               ("frontend", "react", "ui", "component") or
-               b.get("severity") == "critical"
-        ]
+        frontend_bugs = _filter_bugs(
+            bug_reports,
+            severities=["critical"],
+            components=["frontend", "react", "ui", "component"],
+        )
         context += f"\n\n--- BUGS TO FIX (priority: critical first) ---\n"
         for bug in frontend_bugs[:8]:
             context += (
@@ -476,10 +494,7 @@ def run_backend_agent(
             snippet = content[:600] + "\n...[truncated]" if len(content) > 600 else content
             context += f"\n### {path}\n```\n{snippet}\n```\n"
 
-        backend_bugs = [
-            b for b in bug_reports
-            if isinstance(b, dict) and b.get("severity") in ("critical", "high")
-        ]
+        backend_bugs = _filter_bugs(bug_reports, severities=["critical", "high"])
         context += f"\n\n--- BUGS TO FIX (priority: critical first) ---\n"
         for bug in backend_bugs[:8]:
             context += (

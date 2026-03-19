@@ -12,14 +12,17 @@ Uses BaseRegistry for caching and persistence (Quick Win 3).
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.base_registry import BaseRegistry
 
 logger = logging.getLogger(__name__)
+
+# Path to the bundled YAML configuration for the default team
+_UNIVERSAL_TEAM_YAML = Path(__file__).parent / "configs" / "universal_team.yaml"
 
 
 # ============================================================================
@@ -40,6 +43,8 @@ class AgentSpec(BaseModel):
 
 class TeamConfig(BaseModel):
     """Configuration for an agent team."""
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+
     team_id: str = Field(..., description="Unique team identifier")
     name: str = Field(..., description="Human-readable team name")
     description: Optional[str] = None
@@ -65,12 +70,7 @@ class TeamConfig(BaseModel):
 
     # Status
     active: bool = Field(default=True, description="Whether team is active")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
@@ -180,15 +180,79 @@ class TeamRegistry(BaseRegistry[TeamConfig]):
         """
         Create the universal-agents-v1 team.
 
-        This is the default team using agents from /workspace/agents/
+        Loads team configuration from ``orchestrator/configs/universal_team.yaml``
+        when it exists; falls back to hardcoded defaults otherwise.  The YAML
+        file supports ``{spec_location}`` template substitution in ``spec_file``
+        paths so the caller can override the agent spec directory.
 
         Args:
-            spec_location: Base location of agent specifications
+            spec_location: Base location of agent specifications.
 
         Returns:
-            TeamConfig for universal team
+            TeamConfig for the universal team (also persisted to registry).
         """
-        team = TeamConfig(
+        team = cls._load_team_from_yaml(spec_location)
+        if team is None:
+            team = cls._build_default_team(spec_location)
+
+        cls._get_instance().save("universal-agents-v1", team)
+        return team
+
+    @classmethod
+    def _load_team_from_yaml(cls, spec_location: str) -> Optional[TeamConfig]:
+        """Load team configuration from the bundled YAML file.
+
+        Returns None if the YAML file is absent or cannot be parsed.
+        """
+        try:
+            import yaml  # optional dependency; graceful fallback if missing
+        except ImportError:
+            logger.debug("PyYAML not available; using hardcoded team config")
+            return None
+
+        if not _UNIVERSAL_TEAM_YAML.exists():
+            logger.debug("universal_team.yaml not found; using hardcoded team config")
+            return None
+
+        try:
+            with _UNIVERSAL_TEAM_YAML.open() as fh:
+                raw = yaml.safe_load(fh)
+
+            # Substitute {spec_location} placeholder in spec_file paths
+            agents = []
+            for a in raw.get("agents", []):
+                a = dict(a)
+                a["spec_file"] = a.get("spec_file", "").replace("{spec_location}", spec_location)
+                agents.append(AgentSpec(**a))
+
+            team = TeamConfig(
+                team_id=raw["team_id"],
+                name=raw["name"],
+                description=raw.get("description"),
+                spec_location=spec_location,
+                agents=agents,
+                dependencies=raw.get("dependencies", {}),
+                allow_parallel_execution=raw.get("allow_parallel_execution", True),
+                max_retries=raw.get("max_retries", 3),
+                checkpoint_enabled=raw.get("checkpoint_enabled", True),
+            )
+            logger.debug("Loaded universal team config from %s", _UNIVERSAL_TEAM_YAML)
+            return team
+
+        except Exception as exc:
+            logger.warning(
+                "Failed to load universal_team.yaml (%s); using hardcoded defaults", exc
+            )
+            return None
+
+    @staticmethod
+    def _build_default_team(spec_location: str) -> TeamConfig:
+        """Return the hardcoded fallback TeamConfig.
+
+        This mirrors the YAML file and is used when PyYAML is absent or the
+        YAML cannot be parsed.
+        """
+        return TeamConfig(
             team_id="universal-agents-v1",
             name="Universal Agent Team v1",
             description="Default team with support for React + FastAPI, and other stacks",
@@ -246,12 +310,9 @@ class TeamRegistry(BaseRegistry[TeamConfig]):
                 "frontend": ["architecture", "contract_validator"],
                 "backend": ["architecture", "contract_validator"],
                 "qa": ["frontend", "backend"],
-                "documentation": ["planning", "architecture", "frontend", "backend", "qa"]
-            }
+                "documentation": ["planning", "architecture", "frontend", "backend", "qa"],
+            },
         )
-
-        cls._get_instance().save("universal-agents-v1", team)
-        return team
 
     def update(self, key: str, config: TeamConfig) -> bool:
         """Update team config and invalidate dependent caches.

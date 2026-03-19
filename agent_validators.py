@@ -15,6 +15,7 @@ and returns a ValidationResult that the orchestrator can act on:
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from artifact_schemas import SchemaValidator
 from state_models import AgentState
 
 
@@ -51,7 +52,15 @@ class ValidationResult(BaseModel):
 # ============================================================================
 
 class AgentOutputValidator:
-    """Routes output validation to the correct per-agent validator."""
+    """Unified output validator combining structural and rubric checks.
+
+    Validation is performed in two stages:
+    1. **Structural** (via SchemaValidator): Ensures the output dict conforms
+       to the Pydantic model defined for the agent.  A structural failure is
+       always blocking and short-circuits rubric validation.
+    2. **Rubric**: Business-rule checks (field presence, quality thresholds,
+       cross-agent context constraints).
+    """
 
     @staticmethod
     def validate(
@@ -62,6 +71,8 @@ class AgentOutputValidator:
         """
         Validate an agent's output dict.
 
+        Runs structural validation first (SchemaValidator), then rubric checks.
+
         Args:
             agent_id: Which agent produced the output
             output: The output dict to validate
@@ -70,6 +81,20 @@ class AgentOutputValidator:
         Returns:
             ValidationResult with pass/fail and list of issues
         """
+        # ── Stage 1: Structural validation ────────────────────────────────
+        schema_error = SchemaValidator.validate_for_agent(agent_id, output)
+        if schema_error is not None:
+            return ValidationResult(
+                agent_id=agent_id,
+                passed=False,
+                issues=[ValidationIssue(
+                    field="schema",
+                    message=f"Schema validation failed: {schema_error}",
+                    blocking=True,
+                )],
+            )
+
+        # ── Stage 2: Rubric / business-rule validation ────────────────────
         validators = {
             "planning": AgentOutputValidator._validate_planning,
             "architecture": AgentOutputValidator._validate_architecture,

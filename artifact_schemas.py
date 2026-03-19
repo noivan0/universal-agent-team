@@ -6,7 +6,7 @@ produced by each agent. Ensures type safety and contract compliance.
 """
 
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ============================================================================
@@ -64,7 +64,8 @@ class PlanningAgentOutput(BaseModel):
         description="Compact summary for downstream agents"
     )
 
-    @validator("complexity_score")
+    @field_validator("complexity_score")
+    @classmethod
     def validate_complexity(cls, v):
         if not (1 <= v <= 100):
             raise ValueError("complexity_score must be between 1 and 100")
@@ -142,7 +143,8 @@ class ArchitectureAgentOutput(BaseModel):
         description="Compact summary for downstream agents"
     )
 
-    @validator("api_specs")
+    @field_validator("api_specs")
+    @classmethod
     def validate_api_specs(cls, v):
         for path, endpoint in v.items():
             if not path.startswith("/"):
@@ -201,13 +203,15 @@ class DevelopmentAgentOutput(BaseModel):
         description="Dependency versions {agent_id: required_version}"
     )
 
-    @validator("code_files")
+    @field_validator("code_files")
+    @classmethod
     def validate_code_files(cls, v):
         if not v:
             raise ValueError("code_files cannot be empty")
         return v
 
-    @validator("dependencies")
+    @field_validator("dependencies")
+    @classmethod
     def validate_dependencies(cls, v):
         # Remove duplicates
         return list(set(v))
@@ -288,13 +292,15 @@ class QAAgentOutput(BaseModel):
         description="Summary of test results"
     )
 
-    @validator("coverage_percent")
+    @field_validator("coverage_percent")
+    @classmethod
     def validate_coverage(cls, v):
         if not (0.0 <= v <= 100.0):
             raise ValueError("coverage_percent must be between 0 and 100")
         return v
 
-    @validator("passed_tests", "failed_tests", always=True)
+    @field_validator("passed_tests", "failed_tests")
+    @classmethod
     def validate_test_counts(cls, v):
         if v < 0:
             raise ValueError("Test counts cannot be negative")
@@ -390,7 +396,15 @@ class ContractValidatorOutput(BaseModel):
 # ============================================================================
 
 class SchemaValidator:
-    """Validates artifact schemas."""
+    """Validates artifact schemas via Pydantic model instantiation.
+
+    Each method validates structural conformance of an agent's output dict.
+    Use ``validate_for_agent(agent_id, output)`` for agent-id-based dispatch,
+    which is the preferred entry point when calling from AgentOutputValidator.
+    """
+
+    # Dispatch map: agent_id → Pydantic output model
+    _AGENT_MODELS: Dict[str, Any] = {}  # populated after class body
 
     @staticmethod
     def validate_planning_output(output: Dict[str, Any]) -> bool:
@@ -445,3 +459,36 @@ class SchemaValidator:
             return True
         except Exception:
             return False
+
+    @classmethod
+    def validate_for_agent(cls, agent_id: str, output: Dict[str, Any]) -> Optional[str]:
+        """Structural validation entry point dispatched by agent_id.
+
+        Args:
+            agent_id: The producing agent's identifier.
+            output: The output dict to validate.
+
+        Returns:
+            None if the output is structurally valid, or an error message string
+            describing the schema violation.
+        """
+        model_cls = cls._AGENT_MODELS.get(agent_id)
+        if model_cls is None:
+            return None  # No schema registered for this agent — skip structural check
+        try:
+            model_cls(**output)
+            return None
+        except Exception as exc:
+            return str(exc)
+
+
+# Populate dispatch map after model classes are defined
+SchemaValidator._AGENT_MODELS = {
+    "planning": PlanningAgentOutput,
+    "architecture": ArchitectureAgentOutput,
+    "frontend": DevelopmentAgentOutput,
+    "backend": DevelopmentAgentOutput,
+    "qa": QAAgentOutput,
+    "documentation": DocumentationAgentOutput,
+    "contract_validator": ContractValidatorOutput,
+}

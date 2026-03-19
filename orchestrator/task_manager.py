@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ============================================================================
@@ -32,6 +32,8 @@ class TaskStatus(str, Enum):
 
 class TaskRecord(BaseModel):
     """Record of a task execution."""
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+
     task_id: str = Field(..., description="Unique task identifier")
     project_id: str = Field(..., description="Project this task belongs to")
     agent_id: str = Field(..., description="Agent to execute")
@@ -50,7 +52,7 @@ class TaskRecord(BaseModel):
     errors: List[str] = Field(default_factory=list, description="Error messages")
 
     # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     duration_seconds: Optional[float] = None
@@ -62,10 +64,6 @@ class TaskRecord(BaseModel):
         description="Versions of upstream agents"
     )
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
 
 # ============================================================================
@@ -236,26 +234,31 @@ class TaskManager:
         TaskManager.save_task(task, project_id)
 
     @staticmethod
+    def _find_downstream_task_ids(
+        all_tasks: List["TaskRecord"],
+        root_task_id: str,
+        include_root: bool = False,
+    ) -> Set[str]:
+        """BFS traversal to find all downstream task IDs."""
+        to_visit = {root_task_id}
+        visited: Set[str] = set()
+        while to_visit:
+            current = to_visit.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            for task in all_tasks:
+                if current in task.depends_on:
+                    to_visit.add(task.task_id)
+        return visited if include_root else visited - {root_task_id}
+
+    @staticmethod
     def mark_blocked_downstream(project_id: str, failed_task_id: str):
         """Mark all downstream tasks as blocked."""
         all_tasks = TaskManager.get_all_tasks(project_id)
-
-        to_block = {failed_task_id}
-        blocked = set()
-
-        while to_block:
-            current = to_block.pop()
-            if current in blocked:
-                continue
-
-            blocked.add(current)
-
-            for task in all_tasks:
-                if current in task.depends_on:
-                    to_block.add(task.task_id)
-
+        downstream = TaskManager._find_downstream_task_ids(all_tasks, failed_task_id)
         for task in all_tasks:
-            if task.task_id in blocked and task.task_id != failed_task_id:
+            if task.task_id in downstream:
                 task.status = TaskStatus.BLOCKED
                 TaskManager.save_task(task, project_id)
 
@@ -286,23 +289,7 @@ class TaskManager:
     def reset_downstream_tasks(project_id: str, task_id: str):
         """Reset all downstream tasks for re-execution."""
         all_tasks = TaskManager.get_all_tasks(project_id)
-
-        to_reset = {task_id}
-        reset_list = set()
-
-        # Find all downstream tasks
-        while to_reset:
-            current = to_reset.pop()
-            if current in reset_list:
-                continue
-
-            reset_list.add(current)
-
-            for task in all_tasks:
-                if current in task.depends_on:
-                    to_reset.add(task.task_id)
-
-        # Reset them
+        reset_list = TaskManager._find_downstream_task_ids(all_tasks, task_id, include_root=True)
         for task in all_tasks:
             if task.task_id in reset_list:
                 task.status = TaskStatus.PENDING

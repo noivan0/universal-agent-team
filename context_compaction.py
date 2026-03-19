@@ -163,8 +163,7 @@ class RelevanceCalculator:
 
             # Evict oldest entry if at capacity
             if len(cls._relevance_cache) >= cls._MAX_CACHE_SIZE:
-                oldest_key = next(iter(cls._relevance_cache))
-                del cls._relevance_cache[oldest_key]
+                oldest_key, _ = cls._relevance_cache.popitem(last=False)
                 logger.debug(f"Evicted relevance cache entry: {oldest_key}")
 
             cls._relevance_cache[cache_key] = score
