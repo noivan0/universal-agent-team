@@ -31,13 +31,6 @@ from state_models import (
     ExecutionStatus,
     create_initial_state,
 )
-from orchestrator.specialist_agent_selector import (
-    ComplexityFactors,
-    SpecialistAgentRegistry,
-    ComplexityBasedSelector,
-    AgentComplexity,
-)
-from orchestrator.project_registry import ProjectConfig, ProjectStatus, ProjectPhase
 
 
 # ============================================================================
@@ -63,49 +56,6 @@ def pytest_configure(config):
 # ============================================================================
 # Factory Classes for Test Object Creation (Quick Win 5)
 # ============================================================================
-
-class ProjectConfigFactory:
-    """Factory for creating test ProjectConfig objects."""
-
-    counter = 0
-    _epoch = 0
-
-    @classmethod
-    def create(
-        cls,
-        project_id: str = None,
-        user_request: str = None,
-        team_id: str = "universal-agents-v1",
-        complexity_score: int = None,
-        status: ProjectStatus = ProjectStatus.PENDING
-    ) -> ProjectConfig:
-        """
-        Create a test ProjectConfig.
-
-        Args:
-            project_id: Unique project ID (auto-generated if None)
-            user_request: User request description
-            team_id: Team to use
-            complexity_score: Project complexity
-            status: Project status
-
-        Returns:
-            ProjectConfig instance
-        """
-        cls.counter += 1
-        return ProjectConfig(
-            project_id=project_id or f"test_proj_e{cls._epoch}_{cls.counter}",
-            user_request=user_request or f"Test project {cls.counter}",
-            team_id=team_id,
-            status=status,
-            complexity_score=complexity_score or 50,
-        )
-
-    @classmethod
-    def reset(cls):
-        """Reset counter for fresh test runs."""
-        cls.counter = 0
-        cls._epoch += 1
 
 
 class AgentStateFactory:
@@ -302,76 +252,6 @@ def architecture_phase_state(planning_phase_state):
     state.metadata.current_phase = AgentPhase.ARCHITECTURE
     return state
 
-
-# ============================================================================
-# Complexity Factors Fixtures
-# ============================================================================
-
-@pytest.fixture
-def simple_complexity_factors():
-    """Create factors for simple project."""
-    return ComplexityFactors(
-        has_api=True,
-        has_ui_heavy=True,
-        component_count=8,
-        table_count=2,
-        api_endpoint_count=4,
-    )
-
-
-@pytest.fixture
-def complex_complexity_factors():
-    """Create factors for complex project."""
-    return ComplexityFactors(
-        has_api=True,
-        has_microservices=True,
-        has_ui_heavy=True,
-        has_database_heavy=True,
-        has_real_time=False,
-        has_high_load=True,
-        requires_auth=True,
-        requires_compliance=True,
-        requires_performance=True,
-        requires_scalability=True,
-        component_count=25,
-        table_count=12,
-        api_endpoint_count=30,
-        expected_users=100000,
-        expected_concurrent_users=5000,
-        sensitive_data_types=["PII", "Payment Info"],
-    )
-
-
-@pytest.fixture
-def high_performance_factors():
-    """Create factors for high-performance project."""
-    return ComplexityFactors(
-        has_api=True,
-        has_real_time=True,
-        has_high_load=True,
-        requires_performance=True,
-        requires_scalability=True,
-        expected_concurrent_users=50000,
-        global_user_base=True,
-        api_endpoint_count=20,
-        table_count=15,
-    )
-
-
-# ============================================================================
-# Specialist Agent Fixtures
-# ============================================================================
-
-@pytest.fixture
-def specialist_registry():
-    """Create a specialist agent registry."""
-    return SpecialistAgentRegistry()
-
-
-@pytest.fixture
-def specialist_selector(specialist_registry):
-    """Create a specialist selector with default registry."""
-    return ComplexityBasedSelector(specialist_registry)
 
 
 # ============================================================================

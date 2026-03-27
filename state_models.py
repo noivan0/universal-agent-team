@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 from artifact_schemas import ComponentSpec, APIEndpoint
+from memory.models import MemoryContext
 
 
 # ============================================================================
@@ -23,6 +24,7 @@ from artifact_schemas import ComponentSpec, APIEndpoint
 
 class AgentPhase(str, Enum):
     """Agent execution phases."""
+    BRAINSTORMING = "brainstorming"   # Collective pre-brainstorming phase
     PLANNING = "planning"
     ARCHITECTURE = "architecture"
     CONTRACT_VALIDATION = "contract_validation"
@@ -260,6 +262,30 @@ class DocumentationArtifacts(BaseModel):
 
 
 # ============================================================================
+# Brainstorming Models
+# ============================================================================
+
+class BrainstormingPerspective(BaseModel):
+    """A single agent's brainstorming perspective on the project."""
+    agent_role: str                              # "architecture", "frontend", etc.
+    domain_concerns: List[str] = Field(default_factory=list)
+    preliminary_design: Dict[str, Any] = Field(default_factory=dict)
+    recommended_approaches: List[str] = Field(default_factory=list)
+    risks_and_challenges: List[str] = Field(default_factory=list)
+    dependencies_on_others: List[str] = Field(default_factory=list)
+
+
+class BrainstormingArtifacts(BaseModel):
+    """Collective brainstorming results from all 6 domain agents."""
+    perspectives: Dict[str, BrainstormingPerspective] = Field(default_factory=dict)
+    collective_consensus: Optional[str] = None
+    agreed_tech_stack: Optional[Dict[str, str]] = None
+    critical_decisions: List[str] = Field(default_factory=list)
+    early_risks: List[str] = Field(default_factory=list)
+    completed_at: Optional[datetime] = None
+
+
+# ============================================================================
 # Metadata Models
 # ============================================================================
 
@@ -311,6 +337,9 @@ class AgentState(BaseModel):
     # ====== Metadata Section ======
     metadata: ProjectMetadata = Field(default_factory=ProjectMetadata)
 
+    # ====== Brainstorming Section ======
+    brainstorming_artifacts: BrainstormingArtifacts = Field(default_factory=BrainstormingArtifacts)
+
     # ====== Artifact Sections ======
     planning_artifacts: PlanningArtifacts = Field(default_factory=PlanningArtifacts)
     architecture_artifacts: ArchitectureArtifacts = Field(default_factory=ArchitectureArtifacts)
@@ -337,6 +366,13 @@ class AgentState(BaseModel):
 
     # ====== Schema Version ======
     schema_version: str = Field(default="1.0", description="State schema version for migration support")
+
+    # ====== Memory Layer ======
+    memory_context: Optional[MemoryContext] = None
+    """Cross-run context injected before workflow starts via Search Agents."""
+
+    evaluator_score: Optional["EvaluatorScore"] = None
+    """Most recent Evaluator Agent score (set after dev phase, before QA)."""
 
     # ====== Human Interaction ======
     requires_human_approval: bool = False
@@ -406,6 +442,70 @@ class AgentState(BaseModel):
 
 
 # ============================================================================
+# Evaluator Score Model
+# ============================================================================
+
+class EvaluatorCriterionScore(BaseModel):
+    """Score and feedback for a single Evaluator rubric criterion."""
+
+    criterion: str  # e.g. "architecture_coherence"
+    score: float    # 1.0 - 10.0
+    feedback: str   # Specific, actionable feedback for dev agents
+    passed: bool    # score >= EVALUATOR_MIN_SCORE_PER_CRITERION
+
+
+class EvaluatorScore(BaseModel):
+    """Full output of the Evaluator Agent after reviewing generated code.
+
+    Rubric (weights defined in config/constants.py EVALUATOR_WEIGHTS):
+    - architecture_coherence (30%): Code faithfully implements the spec
+    - feature_completeness (35%): No stubs/placeholders — actually implemented
+    - code_quality (20%): TypeScript types, Ruff, consistent structure
+    - functionality (15%): API integration accuracy, business logic
+
+    Attributes:
+        criteria: Per-criterion scores and feedback
+        weighted_avg: Weighted average across all criteria
+        round_number: Which Evaluator iteration produced this score
+        strategy: Recommended strategy for dev agents on re-run
+        overall_feedback: High-level summary for dev agents
+        passed: True if weighted_avg >= threshold AND all criteria pass
+    """
+
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+
+    criteria: List[EvaluatorCriterionScore] = Field(default_factory=list)
+    weighted_avg: float = 0.0
+    round_number: int = 1
+    strategy: Literal["refine", "pivot", "pass"] = "refine"
+    overall_feedback: str = ""
+    passed: bool = False
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def get_criterion(self, name: str) -> Optional[EvaluatorCriterionScore]:
+        """Get score for a specific criterion by name."""
+        for c in self.criteria:
+            if c.criterion == name:
+                return c
+        return None
+
+    def to_dev_feedback(self) -> str:
+        """Render actionable feedback for dev agents."""
+        lines = [
+            f"## Evaluator Feedback (Round {self.round_number})",
+            f"**Overall Score:** {self.weighted_avg:.1f}/10 — Strategy: {self.strategy.upper()}",
+            "",
+            self.overall_feedback,
+            "",
+            "### Per-Criterion Scores:",
+        ]
+        for c in self.criteria:
+            status = "✓" if c.passed else "✗"
+            lines.append(f"- {status} **{c.criterion}** ({c.score:.1f}/10): {c.feedback}")
+        return "\n".join(lines)
+
+
+# ============================================================================
 # State Update Model (for agent responses)
 # ============================================================================
 
@@ -416,6 +516,9 @@ class StateUpdate(BaseModel):
     Agents return this to indicate what state changes to make.
     The orchestrator applies these updates to the state.
     """
+    # Brainstorming update (optional)
+    brainstorming_artifacts: Optional[BrainstormingArtifacts] = None
+
     # Artifact updates (optional)
     planning_artifacts: Optional[PlanningArtifacts] = None
     architecture_artifacts: Optional[ArchitectureArtifacts] = None
@@ -488,6 +591,9 @@ def apply_state_update(state: AgentState, update: StateUpdate) -> AgentState:
     """
     import logging
     logger = logging.getLogger(__name__)
+
+    if update.brainstorming_artifacts:
+        state.brainstorming_artifacts = update.brainstorming_artifacts
 
     if update.planning_artifacts:
         state.planning_artifacts = update.planning_artifacts

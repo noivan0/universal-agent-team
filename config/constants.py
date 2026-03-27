@@ -20,6 +20,30 @@ Usage:
 """
 
 # ============================================================================
+# Brainstorming Configuration
+# ============================================================================
+
+BRAINSTORMING_MAX_TOKENS: int = 2048
+"""Max tokens per brainstorming agent perspective (Full preliminary design depth)."""
+
+BRAINSTORMING_SYNTHESIS_MAX_TOKENS: int = 3000
+"""Max tokens for the synthesis agent that consolidates all perspectives."""
+
+BRAINSTORMING_TEMPERATURE: float = 0.5
+"""Temperature for brainstorming agents (higher than default 0.3 for more creativity)."""
+
+BRAINSTORMING_ROLES: list[str] = [
+    "planning",
+    "architecture",
+    "frontend",
+    "backend",
+    "qa",
+    "documentation",
+]
+"""Domain roles participating in collective brainstorming."""
+
+
+# ============================================================================
 # Agent Configuration
 # ============================================================================
 
@@ -176,259 +200,80 @@ ARTIFACT_AGENT_RELEVANCE: dict[str, dict[str, float]] = {
 """Relevance scores for artifact types to different agents."""
 
 
-# ============================================================================
-# State Management Configuration
-# ============================================================================
 
-CHECKPOINT_BATCH_SIZE: int = 100
-"""Number of operations to batch before writing checkpoint."""
 
-CHECKPOINT_RETENTION_DAYS: int = 30
-"""Number of days to retain checkpoint files."""
 
-MAX_STATE_SIZE_MB: int = 100
-"""Maximum allowed state size in megabytes."""
 
-STATE_VALIDATION_INTERVAL: int = 10
-"""Validate state integrity every N operations."""
 
 
 # ============================================================================
-# Dependency Resolution Configuration
+# Memory Layer Configuration
 # ============================================================================
 
-DEPENDENCY_CACHE_MAX_SIZE: int = 1000
-"""Maximum number of dependency resolution results to cache."""
+MEMORY_ENABLED: bool = True
+"""Global toggle for cross-run memory system."""
 
-DEPENDENCY_RESOLUTION_TIMEOUT: int = 60
-"""Timeout for dependency resolution in seconds."""
+SUPERMEMORY_API_KEY_ENV: str = "SUPERMEMORY_API_KEY"
+"""Environment variable name for Supermemory API key."""
 
-MAX_DEPENDENCY_DEPTH: int = 10
-"""Maximum allowed dependency graph depth to prevent circular references."""
+LOCAL_MEMORY_DIR: str = "~/.claude/memory"
+"""Default local storage directory for JSON-based memory backend."""
 
+MEMORY_RETENTION_DAYS: int = 90
+"""Number of days to retain memory facts before they are ignored on retrieval."""
 
-# ============================================================================
-# Cache Configuration
-# ============================================================================
+OBSERVER_MAX_TOKENS: int = 2048
+"""Max tokens per Observer Agent (3 run in parallel after each phase)."""
 
-RELEVANCE_CACHE_MAX_SIZE: int = 5000
-"""Maximum number of relevance score entries to cache."""
+MEMORY_SEARCH_MAX_TOKENS: int = 2048
+"""Max tokens per Search Agent (3 run in parallel before each workflow)."""
 
-CACHE_TTL_SECONDS: int = 3600
-"""Default cache time-to-live in seconds (1 hour)."""
+OBSERVER_TEMPERATURE: float = 0.2
+"""Temperature for Observer Agents (low — structured fact extraction)."""
 
-REDIS_CONNECTION_TIMEOUT: int = 5
-"""Timeout for Redis connection in seconds."""
+MEMORY_SEARCH_TEMPERATURE: float = 0.2
+"""Temperature for Search Agents (low — focused retrieval)."""
 
-REDIS_RETRY_ATTEMPTS: int = 3
-"""Number of retry attempts for Redis operations."""
+MEMORY_MAX_BUG_PATTERNS: int = 8
+"""Maximum bug patterns to inject into agent context."""
 
-REDIS_RETRY_BACKOFF: float = 0.5
-"""Backoff multiplier for Redis retries in seconds."""
+MEMORY_MAX_SUCCESS_PATTERNS: int = 5
+"""Maximum success patterns to inject into agent context."""
 
+MEMORY_MAX_WARNING_FLAGS: int = 5
+"""Maximum critical warnings to inject into agent context."""
 
-# ============================================================================
-# Circuit Breaker Configuration
-# ============================================================================
-
-CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
-"""Number of failures before opening circuit."""
-
-CIRCUIT_BREAKER_RECOVERY_TIMEOUT: int = 60
-"""Time in seconds before attempting recovery."""
-
-CIRCUIT_BREAKER_SUCCESS_THRESHOLD: int = 2
-"""Number of successes needed to close circuit."""
+MEMORY_SEARCH_LIMIT: int = 20
+"""Maximum facts returned per Search Agent query."""
 
 
 # ============================================================================
-# Database Configuration
+# Evaluator Agent Configuration
 # ============================================================================
 
-DATABASE_POOL_SIZE: int = 20
-"""Maximum number of connections in the database pool."""
+EVALUATOR_THRESHOLD: float = 6.5
+"""Weighted average score below which Evaluator triggers dev agent re-run."""
 
-DATABASE_MAX_OVERFLOW: int = 10
-"""Maximum number of overflow connections beyond pool size."""
+MAX_EVALUATOR_ROUNDS: int = 2
+"""Maximum Evaluator → dev agents iteration rounds (separate from QA healing loop)."""
 
-DATABASE_POOL_TIMEOUT: int = 30
-"""Timeout for acquiring database connection in seconds."""
+EVALUATOR_MAX_TOKENS: int = 4096
+"""Max tokens for Evaluator Agent response."""
 
-DATABASE_POOL_RECYCLE: int = 3600
-"""Recycle database connections after this many seconds (1 hour)."""
+EVALUATOR_TEMPERATURE: float = 0.1
+"""Temperature for Evaluator Agent (very low — consistent rubric scoring)."""
 
-DATABASE_ECHO: bool = False
-"""Enable SQL query logging."""
-
-DATABASE_ISOLATION_LEVEL: str = "READ_COMMITTED"
-"""Default transaction isolation level."""
-
-
-# ============================================================================
-# API Configuration
-# ============================================================================
-
-API_MAX_REQUEST_SIZE: int = 100 * 1024 * 1024
-"""Maximum request body size in bytes (100 MB)."""
-
-API_COMPRESSION_MIN_SIZE: int = 1000
-"""Minimum response size to compress in bytes (1 KB)."""
-
-API_COMPRESSION_LEVEL: int = 6
-"""GZIP compression level (1-9, 6 is default balance)."""
-
-API_RESPONSE_TIMEOUT: int = 300
-"""Maximum time for API response in seconds (5 minutes)."""
-
-API_WORKER_THREADS: int = 4
-"""Number of worker threads for API server."""
-
-# Allowed compression content types
-API_COMPRESSED_CONTENT_TYPES: set[str] = {
-    "application/json",
-    "application/javascript",
-    "text/plain",
-    "text/html",
-    "text/css",
-    "text/xml",
-    "application/xml",
+# Rubric criterion weights (must sum to 1.0)
+EVALUATOR_WEIGHTS: dict[str, float] = {
+    "architecture_coherence": 0.30,  # Does code faithfully implement the spec?
+    "feature_completeness": 0.35,    # No stubs/placeholders — actually implemented?
+    "code_quality": 0.20,            # TypeScript types, Ruff, consistent structure
+    "functionality": 0.15,           # API integration accuracy, business logic
 }
-"""Content types to compress (exclude pre-compressed like images)."""
+"""Rubric weights for the independent Evaluator Agent."""
 
-# Paths to exclude from compression
-API_COMPRESSION_EXCLUDE_PATHS: set[str] = {
-    "/health",
-    "/metrics",
-    "/ping",
-}
-"""Paths to skip compression for."""
-
-
-# ============================================================================
-# Pagination Configuration
-# ============================================================================
-
-DEFAULT_PAGE_SIZE: int = 50
-"""Default number of items per page."""
-
-MAX_PAGE_SIZE: int = 500
-"""Maximum allowed page size."""
-
-MIN_PAGE_SIZE: int = 1
-"""Minimum allowed page size."""
-
-
-# ============================================================================
-# Logging Configuration
-# ============================================================================
-
-LOG_LEVEL: str = "INFO"
-"""Default logging level."""
-
-LOG_FORMAT: str = "json"
-"""Logging output format (json or text)."""
-
-LOG_RETENTION_DAYS: int = 30
-"""Number of days to retain log files."""
-
-LOG_MAX_FILE_SIZE_MB: int = 100
-"""Maximum log file size before rotation in MB."""
-
-LOG_BACKUP_COUNT: int = 10
-"""Number of backup log files to keep."""
-
-# Sensitive fields to redact from logs
-LOG_REDACTED_FIELDS: set[str] = {
-    "password",
-    "token",
-    "api_key",
-    "secret",
-    "credential",
-    "auth",
-}
-"""Field names to redact from logs for security."""
-
-
-# ============================================================================
-# Validation Configuration
-# ============================================================================
-
-# Database URL validation patterns
-VALID_DATABASE_SCHEMES: tuple[str, ...] = (
-    "postgresql://",
-    "postgres://",
-    "mysql://",
-    "sqlite://",
-)
-"""Valid database URL schemes."""
-
-VALID_REDIS_SCHEME: str = "redis://"
-"""Valid Redis URL scheme."""
-
-# Field validation ranges
-VALID_PORT_RANGE: tuple[int, int] = (1024, 65535)
-"""Valid port number range (1024-65535)."""
-
-VALID_LOG_LEVELS: set[str] = {
-    "DEBUG",
-    "INFO",
-    "WARNING",
-    "ERROR",
-    "CRITICAL",
-}
-"""Valid logging levels."""
-
-
-# ============================================================================
-# Cycle Time Monitoring Configuration (if applicable)
-# ============================================================================
-
-# Z-score threshold for anomaly detection
-ANOMALY_ZSCORE_THRESHOLD: float = 2.5
-"""Z-score threshold for cycle boundary anomaly detection.
-
-Why 2.5?
-- Standard normal: 99.4% of values have |z| < 3
-- Z > 2.5 represents ~1.2% tail probability
-- Balances sensitivity and false positive rate
-- Tuned for cycle transition detection
-"""
-
-# Pattern detection thresholds
-PATTERN_MIN_DATA_POINTS: int = 10
-"""Minimum number of data points for pattern detection."""
-
-PATTERN_MIN_PERIOD: int = 5
-"""Minimum period in samples for pattern-based detection."""
-
-AUTOCORRELATION_THRESHOLD: float = 0.5
-"""Threshold for autocorrelation-based period detection.
-
-Values > 0.5 indicate significant correlation, suggesting a repeating pattern.
-"""
-
-# Confidence scores for detection methods
-CONFIDENCE_SIGNAL_BASED: float = 1.0
-"""Confidence score for signal-based cycle detection (explicit markers)."""
-
-CONFIDENCE_ANOMALY_BASED: float = 0.75
-"""Confidence score for anomaly-based cycle detection."""
-
-CONFIDENCE_PATTERN_BASED: float = 0.7
-"""Confidence score for pattern-based cycle detection."""
-
-# Severity thresholds for alerts
-ALERT_SEVERITY_CRITICAL_FACTOR: float = 1.2
-"""Multiplier for critical alerts (cycle > max * 1.2 or < min * 0.8)."""
-
-ROLLING_WINDOW_BASE_DIVISOR: int = 20
-"""Divisor for calculating adaptive rolling window size (len(data) / 20)."""
-
-ROLLING_WINDOW_MIN_SIZE: int = 5
-"""Minimum rolling window size for stability."""
-
-MIN_CYCLE_DURATION_SECONDS: float = 1.0
-"""Minimum cycle duration to prevent noise detection."""
+EVALUATOR_MIN_SCORE_PER_CRITERION: float = 4.0
+"""Any single criterion below this triggers re-run regardless of weighted average."""
 
 
 # ============================================================================

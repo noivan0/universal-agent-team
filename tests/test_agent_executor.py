@@ -418,7 +418,14 @@ class TestExecuteAgentDispatcher:
             execute_agent("nonexistent_agent", state)
 
     def test_all_known_agents_in_dispatcher(self):
-        expected = {"planning", "architecture", "frontend", "backend", "qa", "documentation"}
+        expected = {
+            # Main workflow agents
+            "planning", "architecture", "frontend", "backend", "qa", "documentation",
+            # Brainstorming phase agents
+            "brainstorming_planning", "brainstorming_architecture", "brainstorming_frontend",
+            "brainstorming_backend", "brainstorming_qa", "brainstorming_documentation",
+            "brainstorming_synthesis",
+        }
         assert set(AGENT_RUNNERS.keys()) == expected
 
     def test_dispatches_to_planning(self):

@@ -15,13 +15,18 @@ Design principles
   chatter between agents (the state IS the shared memory).
 """
 
+import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from state_models import (
     AgentState, AgentError, AgentMessage, AgentPhase, ErrorType, StateUpdate,
     PlanningArtifacts, ArchitectureArtifacts, DevelopmentArtifacts,
     DevelopmentSection, TestingArtifacts, DocumentationArtifacts,
+    BrainstormingPerspective, BrainstormingArtifacts,
+    EvaluatorScore, EvaluatorCriterionScore,
 )
 from artifact_schemas import ComponentSpec, APIEndpoint
 from llm_client import LLMClient, LLMResponse, get_client
@@ -64,6 +69,22 @@ def _build_project_context(state: AgentState) -> str:
     ]
     if state.metadata.tech_stack:
         lines.append(f"Tech Stack: {state.metadata.tech_stack}")
+
+    # Inject collective brainstorming insights when available
+    ba = state.brainstorming_artifacts
+    if ba.collective_consensus:
+        lines.append("\n## Collective Brainstorming Insights")
+        consensus = ba.collective_consensus
+        if len(consensus) > 2000:
+            consensus = consensus[:2000] + "\n...[truncated]"
+        lines.append(consensus)
+        if ba.agreed_tech_stack:
+            lines.append(f"\nAgreed Tech Stack: {ba.agreed_tech_stack}")
+        if ba.critical_decisions:
+            lines.append(f"Critical Decisions: {ba.critical_decisions}")
+        if ba.early_risks:
+            lines.append(f"Early Risks: {ba.early_risks}")
+
     if state.planning_artifacts.requirements:
         # Truncate large requirements to save tokens
         reqs = state.planning_artifacts.requirements
@@ -72,6 +93,17 @@ def _build_project_context(state: AgentState) -> str:
         lines.append(f"\n--- Requirements ---\n{reqs}")
     if state.planning_artifacts.complexity_score:
         lines.append(f"Complexity Score: {state.planning_artifacts.complexity_score}/100")
+
+    # Inject cross-run memory context when available
+    if state.memory_context and not state.memory_context.is_empty():
+        memory_section = state.memory_context.to_prompt_section()
+        if memory_section:
+            lines.append(f"\n{memory_section}")
+
+    # Inject evaluator feedback when dev agents are re-running after a failed evaluation
+    if state.evaluator_score and not state.evaluator_score.passed:
+        lines.append(f"\n{state.evaluator_score.to_dev_feedback()}")
+
     return "\n".join(lines)
 
 
@@ -831,10 +863,375 @@ def run_documentation_agent(state: AgentState, client: Optional[LLMClient] = Non
 
 
 # ============================================================================
+# 0. Brainstorming Agents
+# ============================================================================
+
+BRAINSTORMING_SYSTEM_PROMPTS: Dict[str, str] = {
+    "planning": """You are a senior product manager performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+requirements and planning perspective. Focus on scope, ambiguities, priorities, and constraints.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "planning",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "scope_boundaries": "<what is in vs out of scope>",
+    "ambiguities": "<unclear requirements needing clarification>",
+    "mvp_features": "<minimum viable set of features>",
+    "non_functional_requirements": "<performance, security, scalability notes>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from architecture/frontend/backend/qa/docs>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+
+    "architecture": """You are a senior solutions architect performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+system architecture perspective. Focus on patterns, tech stack, data flow, and scalability.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "architecture",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "architecture_pattern": "<recommended pattern: monolith/microservices/serverless/etc.>",
+    "tech_stack_candidates": "<frontend + backend + DB recommendations with rationale>",
+    "data_flow": "<high-level data flow description>",
+    "component_boundaries": "<key system components and their responsibilities>",
+    "integration_points": "<external services, APIs, or systems>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from planning/frontend/backend/qa>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+
+    "frontend": """You are a senior frontend engineer performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+UI/UX and frontend architecture perspective. Focus on component structure, state management, and API integration.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "frontend",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "ui_framework": "<recommended framework and why>",
+    "component_hierarchy": "<top-level component breakdown>",
+    "state_management": "<recommended state management approach>",
+    "routing_structure": "<page/route hierarchy>",
+    "api_integration_pattern": "<how frontend will consume backend APIs>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from architecture/backend/qa>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+
+    "backend": """You are a senior backend engineer performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+backend and API design perspective. Focus on data models, API contracts, auth, and scalability.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "backend",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "api_style": "<REST/GraphQL/gRPC and rationale>",
+    "data_model_sketch": "<key entities and relationships>",
+    "auth_strategy": "<authentication and authorization approach>",
+    "business_logic_structure": "<services, repositories, use cases>",
+    "performance_considerations": "<caching, indexing, bottlenecks>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from architecture/frontend/qa>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+
+    "qa": """You are a senior QA engineer performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+testing and quality assurance perspective. Focus on test strategy, testability, and quality gates.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "qa",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "test_pyramid": "<unit/integration/e2e ratio recommendation>",
+    "critical_paths": "<which flows require 100% coverage>",
+    "testability_concerns": "<design choices that affect testability>",
+    "ci_pipeline": "<recommended CI/CD quality gates>",
+    "performance_and_security_testing": "<non-functional test needs>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from architecture/frontend/backend>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+
+    "documentation": """You are a senior technical writer performing a preliminary brainstorming analysis.
+
+Your job: examine the project request and produce a DESIGN SKETCH (not implementation) from a
+documentation perspective. Focus on audience, doc types, and maintenance strategy.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "agent_role": "documentation",
+  "domain_concerns": ["<concern 1>", "<concern 2>", "..."],
+  "preliminary_design": {
+    "target_audience": "<developers, end users, operators — who reads the docs>",
+    "required_doc_types": "<README, API reference, ADRs, runbooks, etc.>",
+    "doc_as_code": "<feasibility of docs-as-code approach>",
+    "onboarding_sequence": "<recommended sequence for new developers>",
+    "versioning_strategy": "<how to keep docs in sync with code>"
+  },
+  "recommended_approaches": ["<approach 1>", "..."],
+  "risks_and_challenges": ["<risk 1>", "..."],
+  "dependencies_on_others": ["<what you need from planning/architecture/frontend/backend>"]
+}
+
+Rules:
+- domain_concerns: minimum 2, maximum 8 items
+- Do NOT generate code — design sketches only
+- Response MUST be valid, complete JSON""",
+}
+
+BRAINSTORMING_SYNTHESIS_SYSTEM = """You are a senior engineering lead performing synthesis of team brainstorming perspectives.
+
+You have received preliminary design analyses from 6 domain experts (planning, architecture,
+frontend, backend, qa, documentation). Your job: synthesize these into a unified collective
+consensus that will guide the entire multi-agent workflow.
+
+OUTPUT: Respond with a single JSON object only:
+{
+  "collective_consensus": "<500-1000 word synthesis covering: agreed decisions, key trade-offs, cross-cutting concerns, and what each agent should know before starting their main task>",
+  "agreed_tech_stack": {
+    "frontend": "<framework>",
+    "backend": "<framework>",
+    "database": "<technology>",
+    "auth": "<mechanism>",
+    "deployment": "<target>"
+  },
+  "critical_decisions": [
+    "<decision 1 that requires explicit attention during implementation>",
+    "<decision 2>",
+    "..."
+  ],
+  "early_risks": [
+    "<risk identified by multiple perspectives>",
+    "..."
+  ]
+}
+
+Rules:
+- collective_consensus: 200 words minimum, captures cross-cutting themes
+- agreed_tech_stack: include at minimum 'frontend' and 'backend' keys
+- critical_decisions: minimum 2 items
+- Resolve conflicts between perspectives pragmatically — choose the most appropriate approach
+- Response MUST be valid, complete JSON"""
+
+
+def run_brainstorming_agent(
+    perspective_role: str,
+    state: AgentState,
+    client: Optional[LLMClient] = None,
+) -> StateUpdate:
+    """
+    Execute a brainstorming agent for a specific domain perspective.
+
+    Args:
+        perspective_role: One of planning, architecture, frontend, backend, qa, documentation
+        state: Current project state
+        client: Optional LLM client (uses singleton if omitted)
+
+    Returns:
+        StateUpdate with brainstorming_artifacts containing the new perspective
+    """
+    if client is None:
+        client = get_client()
+
+    system_prompt = BRAINSTORMING_SYSTEM_PROMPTS.get(perspective_role)
+    if system_prompt is None:
+        raise ValueError(f"Unknown brainstorming role: '{perspective_role}'")
+
+    user_msg = f"Project Request: {state.metadata.user_request}"
+    if state.metadata.tech_stack:
+        user_msg += f"\nTech Stack Hint: {state.metadata.tech_stack}"
+
+    logger.info(f"[Brainstorming] Running {perspective_role} perspective")
+
+    response: LLMResponse = client.complete(
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_msg}],
+        max_tokens=2048,
+    )
+
+    raw = response.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    data = json.loads(raw)
+
+    perspective = BrainstormingPerspective(
+        agent_role=perspective_role,
+        domain_concerns=data.get("domain_concerns", []),
+        preliminary_design=data.get("preliminary_design", {}),
+        recommended_approaches=data.get("recommended_approaches", []),
+        risks_and_challenges=data.get("risks_and_challenges", []),
+        dependencies_on_others=data.get("dependencies_on_others", []),
+    )
+
+    # Return update with this single perspective; caller merges into state
+    existing = state.brainstorming_artifacts.perspectives.copy()
+    existing[perspective_role] = perspective
+    updated_artifacts = BrainstormingArtifacts(
+        perspectives=existing,
+        collective_consensus=state.brainstorming_artifacts.collective_consensus,
+        agreed_tech_stack=state.brainstorming_artifacts.agreed_tech_stack,
+        critical_decisions=state.brainstorming_artifacts.critical_decisions,
+        early_risks=state.brainstorming_artifacts.early_risks,
+    )
+
+    logger.info(
+        f"[Brainstorming] {perspective_role} complete. "
+        f"Concerns: {len(perspective.domain_concerns)}, "
+        f"Approaches: {len(perspective.recommended_approaches)}. "
+        f"Model: {response.model_used}"
+    )
+
+    return StateUpdate(
+        brainstorming_artifacts=updated_artifacts,
+        message=AgentMessage(
+            agent_id=f"brainstorming_{perspective_role}",
+            role=f"Brainstorming Agent ({perspective_role})",
+            content=(
+                f"Brainstorming ({perspective_role}) complete: "
+                f"{len(perspective.domain_concerns)} concerns, "
+                f"{len(perspective.recommended_approaches)} approaches identified."
+            ),
+        ),
+    )
+
+
+def run_synthesis_agent(
+    state: AgentState,
+    client: Optional[LLMClient] = None,
+) -> StateUpdate:
+    """
+    Synthesize all brainstorming perspectives into collective consensus.
+
+    Args:
+        state: Current project state (must have brainstorming_artifacts.perspectives populated)
+        client: Optional LLM client (uses singleton if omitted)
+
+    Returns:
+        StateUpdate with completed BrainstormingArtifacts
+    """
+    if client is None:
+        client = get_client()
+
+    perspectives = state.brainstorming_artifacts.perspectives
+    perspectives_json = json.dumps(
+        {role: p.model_dump() for role, p in perspectives.items()},
+        indent=2,
+    )
+
+    user_msg = (
+        f"Project Request: {state.metadata.user_request}\n\n"
+        f"Brainstorming Perspectives:\n{perspectives_json}"
+    )
+
+    logger.info(f"[Brainstorming] Running synthesis over {len(perspectives)} perspectives")
+
+    response: LLMResponse = client.complete(
+        system=BRAINSTORMING_SYNTHESIS_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+        max_tokens=3000,
+    )
+
+    raw = response.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    data = json.loads(raw)
+
+    updated_artifacts = BrainstormingArtifacts(
+        perspectives=perspectives,
+        collective_consensus=data.get("collective_consensus", ""),
+        agreed_tech_stack=data.get("agreed_tech_stack"),
+        critical_decisions=data.get("critical_decisions", []),
+        early_risks=data.get("early_risks", []),
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    logger.info(
+        f"[Brainstorming] Synthesis complete. "
+        f"Tech stack agreed: {updated_artifacts.agreed_tech_stack}. "
+        f"Critical decisions: {len(updated_artifacts.critical_decisions)}. "
+        f"Model: {response.model_used}"
+    )
+
+    return StateUpdate(
+        brainstorming_artifacts=updated_artifacts,
+        message=AgentMessage(
+            agent_id="brainstorming_synthesis",
+            role="Brainstorming Synthesis Agent",
+            content=(
+                f"Brainstorming synthesis complete: "
+                f"{len(perspectives)} perspectives consolidated, "
+                f"{len(updated_artifacts.critical_decisions)} critical decisions identified."
+            ),
+        ),
+    )
+
+
+# ============================================================================
 # Dispatcher
 # ============================================================================
 
 AGENT_RUNNERS = {
+    # Brainstorming agents
+    "brainstorming_planning":       lambda state, client=None, **kw: run_brainstorming_agent("planning", state, client),
+    "brainstorming_architecture":   lambda state, client=None, **kw: run_brainstorming_agent("architecture", state, client),
+    "brainstorming_frontend":       lambda state, client=None, **kw: run_brainstorming_agent("frontend", state, client),
+    "brainstorming_backend":        lambda state, client=None, **kw: run_brainstorming_agent("backend", state, client),
+    "brainstorming_qa":             lambda state, client=None, **kw: run_brainstorming_agent("qa", state, client),
+    "brainstorming_documentation":  lambda state, client=None, **kw: run_brainstorming_agent("documentation", state, client),
+    "brainstorming_synthesis":      run_synthesis_agent,
+    # Main workflow agents
     "planning":      run_planning_agent,
     "architecture":  run_architecture_agent,
     "frontend":      run_frontend_agent,
@@ -854,7 +1251,7 @@ def execute_agent(
     Dispatch to the correct agent runner.
 
     Args:
-        agent_id: One of planning, architecture, frontend, backend, qa, documentation
+        agent_id: One of brainstorming_*, planning, architecture, frontend, backend, qa, documentation
         state: Current project state
         client: Optional LLM client (uses singleton if omitted)
         bug_reports: Optional list of bug dicts from QA — activates self-healing mode
@@ -877,3 +1274,521 @@ def execute_agent(
     if agent_id in ("frontend", "backend") and bug_reports:
         return runner(state, client, bug_reports)
     return runner(state, client)
+
+
+# ============================================================================
+# Observer Agents — extract structured facts after each phase
+# ============================================================================
+
+_OBSERVER_SYSTEM = """You are an Observer Agent in a multi-agent AI system.
+Your job: analyse the completed work for this phase and extract structured,
+reusable knowledge facts for future runs.
+
+OUTPUT: Respond with a single JSON object (no prose):
+
+{
+  "facts": [
+    {
+      "category": "<bug_pattern|success_pattern|tech_decision|quality_metric>",
+      "content": "<concise, actionable fact — 1-3 sentences max>",
+      "outcome": "<what happened — fixed_by/used_in/avoided_by>",
+      "severity": "<critical|high|medium|low or null>"
+    }
+  ],
+  "summary": "<2-3 sentence summary of key observations>"
+}
+
+Rules:
+- Extract ONLY non-obvious facts that would genuinely help future runs
+- bug_pattern: concrete issues found, with enough detail to recognize the pattern again
+- success_pattern: approaches that worked particularly well
+- tech_decision: important technology choices and their rationale
+- quality_metric: coverage %, healing rounds used, token cost indicators
+- Maximum 8 facts per observer
+- severity only for bug_pattern facts
+"""
+
+
+def run_observer_agent(
+    phase: str,
+    observer_type: str,
+    context: str,
+    project_type: str,
+    tech_stack: list[str],
+    project_id: str,
+    client: Optional[LLMClient] = None,
+) -> "ObserverOutput":
+    """Run a single Observer Agent to extract facts from a completed phase.
+
+    Args:
+        phase: Workflow phase that just completed (e.g. "frontend+backend").
+        observer_type: "technical" | "quality" | "metrics"
+        context: Relevant phase artifacts serialized as text.
+        project_type: Project category for storage metadata.
+        tech_stack: Technologies used.
+        project_id: Source project ID.
+        client: Optional LLM client.
+
+    Returns:
+        ObserverOutput with extracted MemoryFact objects.
+    """
+    from memory.models import MemoryFact, ObserverOutput
+    from config.constants import OBSERVER_MAX_TOKENS, OBSERVER_TEMPERATURE
+
+    if client is None:
+        client = get_client()
+
+    focus_map = {
+        "technical": "technical decisions, architecture choices, and technology rationale",
+        "quality": "bugs found, their root causes, how they were resolved, and recurring patterns",
+        "metrics": "quality metrics (coverage, healing rounds, error rates) and performance indicators",
+    }
+    focus = focus_map.get(observer_type, "general observations")
+
+    user_msg = (
+        f"Phase: {phase}\n"
+        f"Observer Focus: {focus}\n\n"
+        f"=== Phase Artifacts ===\n{context[:4000]}"
+    )
+
+    try:
+        resp = client.call(
+            system=_OBSERVER_SYSTEM,
+            user=user_msg,
+            max_tokens=OBSERVER_MAX_TOKENS,
+            temperature=OBSERVER_TEMPERATURE,
+        )
+        data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+    except Exception as e:
+        logger.warning("Observer agent (%s/%s) failed: %s", phase, observer_type, e)
+        return ObserverOutput(observer_type=observer_type, phase=phase)
+
+    facts = []
+    for raw in data.get("facts", []):
+        if not isinstance(raw, dict) or not raw.get("content"):
+            continue
+        try:
+            facts.append(MemoryFact(
+                category=raw.get("category", "quality_metric"),
+                project_type=project_type,
+                tech_stack=tech_stack,
+                phase=phase,
+                content=raw["content"],
+                outcome=raw.get("outcome", ""),
+                severity=raw.get("severity"),
+                project_id=project_id,
+            ))
+        except Exception as e:
+            logger.debug("Skipping malformed fact: %s", e)
+
+    return ObserverOutput(
+        observer_type=observer_type,
+        phase=phase,
+        facts=facts,
+        summary=data.get("summary", ""),
+    )
+
+
+def run_observer_agents_parallel(
+    phase: str,
+    state: AgentState,
+    client: Optional[LLMClient] = None,
+) -> list["ObserverOutput"]:
+    """Run 3 Observer Agents in parallel after a phase completes.
+
+    Args:
+        phase: Phase name that just completed.
+        state: Current AgentState (used for context extraction).
+        client: Optional LLM client.
+
+    Returns:
+        List of 3 ObserverOutput objects (one per observer type).
+    """
+    from memory.models import ObserverOutput
+
+    project_id = state.metadata.project_id
+    project_type = _infer_project_type(state)
+    tech_stack = _extract_tech_stack(state)
+    context = _build_observer_context(phase, state)
+
+    observer_types = ["technical", "quality", "metrics"]
+    outputs: list[ObserverOutput] = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(
+                run_observer_agent,
+                phase, ot, context, project_type, tech_stack, project_id, client
+            ): ot
+            for ot in observer_types
+        }
+        for future in as_completed(futures):
+            ot = futures[future]
+            try:
+                outputs.append(future.result())
+            except Exception as e:
+                logger.warning("Observer %s failed: %s", ot, e)
+                outputs.append(ObserverOutput(observer_type=ot, phase=phase))
+
+    total_facts = sum(len(o.facts) for o in outputs)
+    logger.info("Observer agents (%s): extracted %d facts", phase, total_facts)
+    return outputs
+
+
+def _infer_project_type(state: AgentState) -> str:
+    """Infer a project type label from the user request."""
+    req = state.metadata.user_request.lower()
+    if any(w in req for w in ["dashboard", "admin", "cms"]):
+        return "admin-dashboard"
+    if any(w in req for w in ["ecommerce", "shop", "store", "cart"]):
+        return "ecommerce"
+    if any(w in req for w in ["chat", "messaging", "realtime"]):
+        return "realtime-app"
+    if any(w in req for w in ["api", "rest", "graphql", "microservice"]):
+        return "api-service"
+    if any(w in req for w in ["game", "canvas", "webgl"]):
+        return "game"
+    return "fullstack-web"
+
+
+def _extract_tech_stack(state: AgentState) -> list[str]:
+    """Extract tech stack list from state."""
+    stack = []
+    if state.metadata.tech_stack:
+        stack.extend(state.metadata.tech_stack.values())
+    if state.brainstorming_artifacts.agreed_tech_stack:
+        agreed = state.brainstorming_artifacts.agreed_tech_stack
+        if isinstance(agreed, dict):
+            stack.extend(str(v) for v in agreed.values())
+        elif isinstance(agreed, list):
+            stack.extend(str(v) for v in agreed)
+    return [s.lower() for s in stack if s]
+
+
+def _build_observer_context(phase: str, state: AgentState) -> str:
+    """Build a compact context string for Observer Agents from phase artifacts."""
+    parts = []
+
+    if "frontend" in phase or "backend" in phase or "dev" in phase:
+        fe = state.development.frontend
+        be = state.development.backend
+        if fe.code_files:
+            parts.append(f"Frontend files: {list(fe.code_files.keys())}")
+            parts.append(f"Frontend summary: {fe.summary or 'N/A'}")
+        if be.code_files:
+            parts.append(f"Backend files: {list(be.code_files.keys())}")
+            parts.append(f"Backend summary: {be.summary or 'N/A'}")
+
+    if "qa" in phase or "testing" in phase:
+        ta = state.testing_artifacts
+        if ta.test_results:
+            parts.append(f"Test results: {json.dumps(ta.test_results)}")
+        if ta.bug_reports:
+            parts.append(f"Bug reports ({len(ta.bug_reports)}): {json.dumps(ta.bug_reports[:5])}")
+        if ta.error_analysis:
+            parts.append(f"Error analysis: {json.dumps(ta.error_analysis)}")
+
+    if "architecture" in phase:
+        arch = state.architecture_artifacts
+        if arch.system_design:
+            parts.append(f"Architecture: {arch.system_design[:500]}")
+        if arch.technology_decisions:
+            parts.append(f"Tech decisions: {arch.technology_decisions}")
+
+    if not parts:
+        parts.append(f"Phase {phase} completed.")
+        parts.append(f"User request: {state.metadata.user_request}")
+
+    return "\n".join(parts)
+
+
+# ============================================================================
+# Search Agents — retrieve relevant context before a workflow run
+# ============================================================================
+
+_SEARCH_SYSTEM = """You are a Search Agent in a multi-agent AI system.
+Your job: given stored memory facts, synthesise the most relevant insights
+for the upcoming project run.
+
+OUTPUT: Respond with a single JSON object (no prose):
+
+{
+  "synthesis": "<2-4 sentence synthesis of key insights relevant to this project>",
+  "key_points": ["<point 1>", "<point 2>", "..."]
+}
+
+Focus only on actionable insights — skip obvious or generic advice.
+Maximum 6 key_points.
+"""
+
+
+def run_search_agents_parallel(
+    user_request: str,
+    project_type: str,
+    tech_stack: list[str],
+    client: Optional[LLMClient] = None,
+) -> "MemoryContext":
+    """Run 3 Search Agents in parallel to build pre-run MemoryContext.
+
+    Each agent queries the memory backend for a specific category and uses
+    the LLM to synthesise a focused summary. The final MemoryContext is built
+    from the backend search results (synthesis is logged for debugging only).
+
+    Args:
+        user_request: The user's project description.
+        project_type: Inferred project category.
+        tech_stack: Target technologies.
+        client: Optional LLM client.
+
+    Returns:
+        MemoryContext ready to inject into state.
+    """
+    from memory.memory_manager import get_memory_manager
+    from config.constants import MEMORY_SEARCH_MAX_TOKENS, MEMORY_SEARCH_TEMPERATURE
+
+    manager = get_memory_manager()
+    if client is None:
+        client = get_client()
+
+    def _search_and_summarise(focus: str, category: str) -> str:
+        """Search memory and return an LLM synthesis string (for logging)."""
+        facts = manager.search(
+            category=category,
+            project_type=project_type,
+            tech_stack=tech_stack,
+            limit=15,
+        )
+        if not facts:
+            return ""
+        facts_text = "\n".join(
+            f"[{f.category}/{f.severity or 'info'}] {f.content} → {f.outcome}"
+            for f in facts[:10]
+        )
+        user_msg = (
+            f"Project: {user_request[:300]}\n"
+            f"Tech stack: {tech_stack}\n"
+            f"Search focus: {focus}\n\n"
+            f"=== Retrieved Facts ===\n{facts_text}"
+        )
+        try:
+            resp = client.call(
+                system=_SEARCH_SYSTEM,
+                user=user_msg,
+                max_tokens=MEMORY_SEARCH_MAX_TOKENS,
+                temperature=MEMORY_SEARCH_TEMPERATURE,
+            )
+            data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+            return data.get("synthesis", "")
+        except Exception as e:
+            logger.warning("Search agent (%s) LLM call failed: %s", focus, e)
+            return ""
+
+    focus_category_map = [
+        ("direct_facts", "bug_pattern"),
+        ("patterns", "success_pattern"),
+        ("preferences", "user_preference"),
+    ]
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(_search_and_summarise, focus, cat): focus
+            for focus, cat in focus_category_map
+        }
+        for future in as_completed(futures):
+            focus = futures[future]
+            try:
+                synthesis = future.result()
+                if synthesis:
+                    logger.debug("Search agent (%s) synthesis: %s", focus, synthesis[:200])
+            except Exception as e:
+                logger.warning("Search agent (%s) error: %s", focus, e)
+
+    ctx = manager.build_context(project_type=project_type, tech_stack=tech_stack)
+    logger.info("Pre-run memory context built: empty=%s", ctx.is_empty())
+    return ctx
+
+
+# ============================================================================
+# Evaluator Agent — independent rubric-based code review
+# ============================================================================
+
+_EVALUATOR_SYSTEM = """You are the Evaluator Agent — an independent code reviewer
+in a multi-agent software development system.
+
+You review generated frontend and backend code against a 4-criterion rubric.
+You are DELIBERATELY SKEPTICAL. Do NOT praise mediocre work. Your job is to
+catch real problems before they reach QA.
+
+OUTPUT: Respond with a single JSON object (no prose):
+
+{
+  "criteria": [
+    {
+      "criterion": "architecture_coherence",
+      "score": <1-10>,
+      "feedback": "<specific, actionable feedback>",
+      "passed": <true if score >= 4>
+    },
+    {
+      "criterion": "feature_completeness",
+      "score": <1-10>,
+      "feedback": "<specific, actionable feedback>",
+      "passed": <true if score >= 4>
+    },
+    {
+      "criterion": "code_quality",
+      "score": <1-10>,
+      "feedback": "<specific, actionable feedback>",
+      "passed": <true if score >= 4>
+    },
+    {
+      "criterion": "functionality",
+      "score": <1-10>,
+      "feedback": "<specific, actionable feedback>",
+      "passed": <true if score >= 4>
+    }
+  ],
+  "weighted_avg": <float>,
+  "strategy": "<refine|pivot|pass>",
+  "overall_feedback": "<2-4 sentences: what the dev agents should focus on next>"
+}
+
+Rubric:
+- architecture_coherence (30%): Code faithfully implements the spec.
+  Fail if: missing components, wrong data flows, API mismatches with spec.
+- feature_completeness (35%): ALL spec features actually implemented.
+  Fail if: stub functions, TODO comments, placeholder returns, missing endpoints.
+- code_quality (20%): TypeScript strict mode, consistent naming, no any types.
+  Fail if: implicit any, missing types, inconsistent patterns.
+- functionality (15%): Business logic is correct, API calls match backend routes.
+  Fail if: hardcoded data, broken imports, obvious logic errors.
+
+Strategy guidance:
+- "pass": weighted_avg >= 6.5 AND all criteria >= 4
+- "refine": score 5-6.4 — keep current approach but fix specific issues
+- "pivot": score < 5 — fundamental problems, try a different approach
+"""
+
+
+def run_evaluator_agent(
+    state: AgentState,
+    round_number: int = 1,
+    client: Optional[LLMClient] = None,
+) -> EvaluatorScore:
+    """Run the independent Evaluator Agent on generated dev code.
+
+    Evaluator feedback from a previous round is automatically included via
+    state.evaluator_score, which _build_project_context() injects into dev
+    agent prompts on re-run.
+
+    Args:
+        state: Current AgentState (must have development artifacts).
+        round_number: Which evaluation round this is (1-based).
+        client: Optional LLM client.
+
+    Returns:
+        EvaluatorScore with per-criterion scores and actionable feedback.
+    """
+    from config.constants import (
+        EVALUATOR_MAX_TOKENS, EVALUATOR_TEMPERATURE, EVALUATOR_WEIGHTS,
+        EVALUATOR_MIN_SCORE_PER_CRITERION, EVALUATOR_THRESHOLD,
+    )
+
+    if client is None:
+        client = get_client()
+
+    # Build context: spec + generated code summary
+    arch = state.architecture_artifacts
+    fe = state.development.frontend
+    be = state.development.backend
+
+    spec_summary = []
+    if arch.component_specs:
+        spec_summary.append(f"Components spec: {list(arch.component_specs.keys())}")
+    if arch.api_specs:
+        spec_summary.append(f"API spec endpoints: {list(arch.api_specs.keys())}")
+    if arch.system_design:
+        spec_summary.append(f"Architecture: {arch.system_design[:500]}")
+
+    code_summary = []
+    if fe.code_files:
+        code_summary.append(f"Frontend files ({len(fe.code_files)}): {list(fe.code_files.keys())}")
+        # Sample a few file snippets
+        for fname, content in list(fe.code_files.items())[:3]:
+            code_summary.append(f"\n--- {fname} (first 300 chars) ---\n{content[:300]}")
+    if be.code_files:
+        code_summary.append(f"Backend files ({len(be.code_files)}): {list(be.code_files.keys())}")
+        for fname, content in list(be.code_files.items())[:3]:
+            code_summary.append(f"\n--- {fname} (first 300 chars) ---\n{content[:300]}")
+
+    user_msg_parts = [
+        f"Evaluation Round: {round_number}",
+        f"\n=== SPEC ===\n{chr(10).join(spec_summary)}",
+        f"\n=== GENERATED CODE ===\n{chr(10).join(code_summary)}",
+    ]
+
+    user_msg = "\n".join(user_msg_parts)
+
+    try:
+        resp = client.call(
+            system=_EVALUATOR_SYSTEM,
+            user=user_msg,
+            max_tokens=EVALUATOR_MAX_TOKENS,
+            temperature=EVALUATOR_TEMPERATURE,
+        )
+        data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+    except Exception as e:
+        logger.error("Evaluator agent failed: %s", e)
+        return EvaluatorScore(
+            criteria=[],
+            weighted_avg=0.0,
+            round_number=round_number,
+            strategy="refine",
+            overall_feedback=f"Evaluator LLM call failed: {e}. Dev agents will re-run with previous context.",
+            passed=False,
+        )
+
+    # Parse criteria
+    criteria_list = []
+    raw_weighted = 0.0
+    for raw_c in data.get("criteria", []):
+        name = raw_c.get("criterion", "")
+        score = float(raw_c.get("score", 5.0))
+        feedback = raw_c.get("feedback", "")
+        weight = EVALUATOR_WEIGHTS.get(name, 0.25)
+        passed = score >= EVALUATOR_MIN_SCORE_PER_CRITERION
+        criteria_list.append(EvaluatorCriterionScore(
+            criterion=name,
+            score=score,
+            feedback=feedback,
+            passed=passed,
+        ))
+        raw_weighted += score * weight
+
+    # Use LLM-provided weighted_avg if available and sensible
+    weighted_avg = float(data.get("weighted_avg", raw_weighted))
+    if not (0 <= weighted_avg <= 10):
+        weighted_avg = raw_weighted
+
+    all_criteria_pass = all(c.passed for c in criteria_list)
+    overall_passed = weighted_avg >= EVALUATOR_THRESHOLD and all_criteria_pass
+    strategy = data.get("strategy", "refine")
+    if overall_passed:
+        strategy = "pass"
+
+    score = EvaluatorScore(
+        criteria=criteria_list,
+        weighted_avg=round(weighted_avg, 2),
+        round_number=round_number,
+        strategy=strategy,
+        overall_feedback=data.get("overall_feedback", ""),
+        passed=overall_passed,
+    )
+
+    logger.info(
+        "Evaluator round %d: %.1f/10 — %s",
+        round_number,
+        weighted_avg,
+        "PASS" if overall_passed else "FAIL",
+    )
+    return score

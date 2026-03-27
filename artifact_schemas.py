@@ -355,6 +355,58 @@ class DocumentationAgentOutput(BaseModel):
 
 
 # ============================================================================
+# Brainstorming Agent Output Schemas
+# ============================================================================
+
+class BrainstormingAgentOutput(BaseModel):
+    """Schema for a single brainstorming agent's perspective output."""
+    agent_role: str = Field(..., description="Role of the agent producing this perspective")
+    domain_concerns: List[str] = Field(
+        default_factory=list,
+        min_length=1,
+        description="Key domain concerns identified by this agent"
+    )
+    preliminary_design: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Full preliminary design sketch from this domain's perspective"
+    )
+    recommended_approaches: List[str] = Field(
+        default_factory=list,
+        min_length=1,
+        description="Recommended technical approaches"
+    )
+    risks_and_challenges: List[str] = Field(
+        default_factory=list,
+        description="Anticipated risks and challenges"
+    )
+    dependencies_on_others: List[str] = Field(
+        default_factory=list,
+        description="Dependencies on other agents' outputs"
+    )
+
+
+class BrainstormingSynthesisOutput(BaseModel):
+    """Schema for the synthesis agent that consolidates all brainstorming perspectives."""
+    collective_consensus: str = Field(
+        ...,
+        description="Synthesized consensus from all brainstorming perspectives"
+    )
+    agreed_tech_stack: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Agreed technology stack across all perspectives"
+    )
+    critical_decisions: List[str] = Field(
+        default_factory=list,
+        min_length=1,
+        description="Critical architectural decisions requiring attention"
+    )
+    early_risks: List[str] = Field(
+        default_factory=list,
+        description="Early risks identified across all perspectives"
+    )
+
+
+# ============================================================================
 # Contract Validator Output Schema (Optional Agent)
 # ============================================================================
 
@@ -491,4 +543,12 @@ SchemaValidator._AGENT_MODELS = {
     "qa": QAAgentOutput,
     "documentation": DocumentationAgentOutput,
     "contract_validator": ContractValidatorOutput,
+    # Brainstorming agents
+    "brainstorming_planning":      BrainstormingAgentOutput,
+    "brainstorming_architecture":  BrainstormingAgentOutput,
+    "brainstorming_frontend":      BrainstormingAgentOutput,
+    "brainstorming_backend":       BrainstormingAgentOutput,
+    "brainstorming_qa":            BrainstormingAgentOutput,
+    "brainstorming_documentation": BrainstormingAgentOutput,
+    "brainstorming_synthesis":     BrainstormingSynthesisOutput,
 }

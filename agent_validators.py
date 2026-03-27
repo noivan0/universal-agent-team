@@ -102,6 +102,14 @@ class AgentOutputValidator:
             "backend": AgentOutputValidator._validate_development,
             "qa": AgentOutputValidator._validate_qa,
             "documentation": AgentOutputValidator._validate_documentation,
+            # Brainstorming agents
+            "brainstorming_planning":      AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_architecture":  AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_frontend":      AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_backend":       AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_qa":            AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_documentation": AgentOutputValidator._validate_brainstorming_domain,
+            "brainstorming_synthesis":     AgentOutputValidator._validate_brainstorming_synthesis,
         }
         fn = validators.get(agent_id, AgentOutputValidator._validate_generic)
         return fn(agent_id, output, state)
@@ -267,6 +275,82 @@ class AgentOutputValidator:
                 field="readme",
                 message="Documentation Agent must produce a README",
                 blocking=True
+            ))
+
+        return ValidationResult(
+            agent_id=agent_id,
+            passed=not any(i.blocking for i in issues),
+            issues=issues
+        )
+
+    @staticmethod
+    def _validate_brainstorming_domain(
+        agent_id: str,
+        output: Dict[str, Any],
+        state: AgentState
+    ) -> ValidationResult:
+        """Brainstorming domain agents: must have non-empty domain_concerns and preliminary_design."""
+        issues: List[ValidationIssue] = []
+
+        domain_concerns = output.get("domain_concerns", [])
+        if not domain_concerns:
+            issues.append(ValidationIssue(
+                field="domain_concerns",
+                message=f"{agent_id}: domain_concerns is empty or missing",
+                blocking=True
+            ))
+
+        preliminary_design = output.get("preliminary_design", {})
+        if not preliminary_design:
+            issues.append(ValidationIssue(
+                field="preliminary_design",
+                message=f"{agent_id}: preliminary_design is empty or missing",
+                blocking=True
+            ))
+
+        recommended_approaches = output.get("recommended_approaches", [])
+        if not recommended_approaches:
+            issues.append(ValidationIssue(
+                field="recommended_approaches",
+                message=f"{agent_id}: recommended_approaches is empty or missing",
+                blocking=False
+            ))
+
+        return ValidationResult(
+            agent_id=agent_id,
+            passed=not any(i.blocking for i in issues),
+            issues=issues
+        )
+
+    @staticmethod
+    def _validate_brainstorming_synthesis(
+        agent_id: str,
+        output: Dict[str, Any],
+        state: AgentState
+    ) -> ValidationResult:
+        """Synthesis agent: must provide collective_consensus; warns if agreed_tech_stack is empty."""
+        issues: List[ValidationIssue] = []
+
+        if not output.get("collective_consensus"):
+            issues.append(ValidationIssue(
+                field="collective_consensus",
+                message="brainstorming_synthesis: collective_consensus is empty or missing",
+                blocking=True
+            ))
+
+        if not output.get("agreed_tech_stack"):
+            issues.append(ValidationIssue(
+                field="agreed_tech_stack",
+                message="brainstorming_synthesis: agreed_tech_stack is empty (non-blocking warning)",
+                blocking=False
+            ))
+
+        critical_decisions = output.get("critical_decisions", [])
+        if not critical_decisions:
+            issues.append(ValidationIssue(
+                field="critical_decisions",
+                message="brainstorming_synthesis: critical_decisions is empty",
+                blocking=False
             ))
 
         return ValidationResult(

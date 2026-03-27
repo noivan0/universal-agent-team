@@ -14,6 +14,57 @@ max_retries: 3
 checkpoint_enabled: true
 
 agents:
+  # ── Brainstorming Phase (all 6 run in parallel, synthesis is serial) ──────
+  - agent_id: "brainstorming_planning"
+    role: "planning"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from requirements and planning perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_architecture"
+    role: "architecture"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from architecture and system design perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_frontend"
+    role: "frontend"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from frontend and UI/UX perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_backend"
+    role: "backend"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from backend and API design perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_qa"
+    role: "qa"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from testing and quality perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_documentation"
+    role: "documentation"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Pre-brainstorm from documentation perspective"
+    phase: "brainstorming"
+    specializations: []
+
+  - agent_id: "brainstorming_synthesis"
+    role: "synthesis"
+    spec_file: "{spec_location}/00-brainstorming-agent.md"
+    description: "Synthesize all brainstorming perspectives into collective consensus"
+    phase: "brainstorming"
+    specializations: []
+
+  # ── Main Workflow ─────────────────────────────────────────────────────────
   - agent_id: "planning"
     role: "planning"
     spec_file: "{spec_location}/01-planning-agent.md"
@@ -65,10 +116,28 @@ agents:
     specializations: []
 
 # Dependency graph: {agent_id: [depends_on_agent_ids]}
-# Agents with no dependencies run first (planning).
-# Parallel execution is inferred from agents that share the same dependency set.
+# Agents with no dependencies run first.
+# Brainstorming agents (6) run in parallel; synthesis runs after all 6 complete.
+# Main workflow agents depend on brainstorming_synthesis completing first.
 dependencies:
-  planning: []
+  # Brainstorming phase — all 6 domain agents run in parallel (no deps)
+  brainstorming_planning: []
+  brainstorming_architecture: []
+  brainstorming_frontend: []
+  brainstorming_backend: []
+  brainstorming_qa: []
+  brainstorming_documentation: []
+  # Synthesis waits for all 6 brainstorming agents
+  brainstorming_synthesis:
+    - brainstorming_planning
+    - brainstorming_architecture
+    - brainstorming_frontend
+    - brainstorming_backend
+    - brainstorming_qa
+    - brainstorming_documentation
+  # Main workflow: planning depends on synthesis output
+  planning:
+    - brainstorming_synthesis
   architecture:
     - planning
   contract_validator:

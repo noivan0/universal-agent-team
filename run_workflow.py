@@ -21,7 +21,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -39,14 +39,31 @@ logger = logging.getLogger("workflow_runner")
 # ── Imports ───────────────────────────────────────────────────────────────────
 from state_models import (
     create_initial_state, AgentState, AgentPhase, apply_state_update,
-    StateUpdate, DocumentationArtifacts, AgentMessage,
+    StateUpdate, DocumentationArtifacts, AgentMessage, BrainstormingArtifacts,
 )
-from agent_executor import execute_agent, AGENT_RUNNERS, _filter_bugs
+from agent_executor import (
+    execute_agent, AGENT_RUNNERS, _filter_bugs,
+    run_evaluator_agent, run_observer_agents_parallel, run_search_agents_parallel,
+    _infer_project_type, _extract_tech_stack,
+)
 from agent_bus import reset_bus, get_bus, ContractValidator
 from agent_validators import AgentOutputValidator
 from checkpoint_manager import CheckpointManager, ExecutionCheckpoint, migrate_state
+from config.constants import MEMORY_ENABLED, MAX_EVALUATOR_ROUNDS, EVALUATOR_THRESHOLD
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+
+# Phase 0: Collective brainstorming — all 6 domain agents run in parallel
+BRAINSTORMING_ROLES = [
+    "brainstorming_planning",
+    "brainstorming_architecture",
+    "brainstorming_frontend",
+    "brainstorming_backend",
+    "brainstorming_qa",
+    "brainstorming_documentation",
+]
+BRAINSTORMING_SYNTHESIS_AGENT = "brainstorming_synthesis"
+
 WORKFLOW_ORDER = [
     "planning",
     "architecture",
@@ -69,19 +86,63 @@ CHECKPOINT_DIR = Path("/workspace/checkpoints")
 
 
 # ============================================================================
+# Brainstorming helpers
+# ============================================================================
+
+def _apply_brainstorming_perspective(
+    state: AgentState,
+    agent_id: str,
+    update: StateUpdate,
+) -> AgentState:
+    """
+    Merge a single brainstorming perspective into state.brainstorming_artifacts.
+
+    Each brainstorming agent returns an update with a BrainstormingArtifacts
+    containing exactly one perspective in `perspectives`.  This helper merges
+    that single perspective into the accumulated state without overwriting
+    perspectives already collected from other parallel agents.
+    """
+    if not update or not update.brainstorming_artifacts:
+        return state
+
+    incoming = update.brainstorming_artifacts
+    # Merge perspectives: accumulate rather than replace
+    merged_perspectives = dict(state.brainstorming_artifacts.perspectives)
+    merged_perspectives.update(incoming.perspectives)
+
+    state.brainstorming_artifacts = BrainstormingArtifacts(
+        perspectives=merged_perspectives,
+        collective_consensus=state.brainstorming_artifacts.collective_consensus,
+        agreed_tech_stack=state.brainstorming_artifacts.agreed_tech_stack,
+        critical_decisions=state.brainstorming_artifacts.critical_decisions,
+        early_risks=state.brainstorming_artifacts.early_risks,
+        completed_at=state.brainstorming_artifacts.completed_at,
+    )
+
+    if update.message:
+        state.add_message(update.message)
+
+    state.metadata.last_modified_at = datetime.now(timezone.utc)
+    return state
+
+
+# ============================================================================
 # Validation helper
 # ============================================================================
 
-def _validate_agent_output(agent_id: str, update: object, state: AgentState) -> None:
+def _validate_agent_output(
+    agent_id: str,
+    update: object,
+    state: AgentState,
+    errors_encountered: list,
+) -> None:
     """
     Run AgentOutputValidator on a StateUpdate before it is applied.
 
-    Extracts the relevant output dict from the typed StateUpdate, validates
-    it, and logs issues.  Non-blocking issues are warnings; blocking issues
-    are logged as errors.  The pipeline always continues (observability
-    without changing apply behaviour).
+    Non-blocking issues are logged as warnings.
+    Blocking issues are logged as errors AND recorded in errors_encountered
+    so the final workflow summary captures them.
     """
-    # Build a representative output dict from whichever artifact was set
     output_dict: dict = {}
     if update.planning_artifacts:
         output_dict = update.planning_artifacts.model_dump()
@@ -104,14 +165,14 @@ def _validate_agent_output(agent_id: str, update: object, state: AgentState) -> 
         output_dict = {"readme": update.documentation_artifacts.readme}
 
     if not output_dict:
-        return  # Nothing to validate
+        return
 
     result = AgentOutputValidator.validate(agent_id, output_dict, state)
     for issue in result.issues:
         if issue.blocking:
-            logger.error(
-                f"[Validator] {agent_id}.{issue.field}: {issue.message} (BLOCKING)"
-            )
+            msg = f"[Validator] {agent_id}.{issue.field}: {issue.message} (BLOCKING)"
+            logger.error(msg)
+            errors_encountered.append((f"validation:{agent_id}", issue.message))
         else:
             logger.warning(
                 f"[Validator] {agent_id}.{issue.field}: {issue.message}"
@@ -506,6 +567,105 @@ def save_outputs(state: AgentState, project_id: str):
 
 
 # ============================================================================
+# Evaluator Loop helper
+# ============================================================================
+
+def _run_evaluator_loop(
+    state: AgentState,
+    errors_encountered: list,
+) -> AgentState:
+    """Run the Evaluator Agent loop before QA.
+
+    Independently scores generated code against a 4-criterion rubric.
+    If score < threshold, dev agents are re-run with evaluator feedback.
+    Repeats up to MAX_EVALUATOR_ROUNDS times.
+
+    Args:
+        state: Current workflow state (must have development artifacts).
+        errors_encountered: Shared error list for logging.
+
+    Returns:
+        Updated state (with evaluator_score set).
+    """
+    if not (state.development.frontend.code_files or state.development.backend.code_files):
+        logger.debug("Evaluator: no dev artifacts found — skipping")
+        return state
+
+    logger.info("\n  ▶ Running Evaluator Agent (independent code review)")
+
+    for round_num in range(1, MAX_EVALUATOR_ROUNDS + 1):
+        try:
+            score = run_evaluator_agent(state=state, round_number=round_num)
+            state.evaluator_score = score  # feedback injected via _build_project_context()
+
+            if score.passed:
+                logger.info(
+                    "  ✓ Evaluator round %d: %.1f/10 — PASS (proceeding to QA)",
+                    round_num, score.weighted_avg,
+                )
+                break
+
+            logger.warning(
+                "  ⚠ Evaluator round %d: %.1f/10 — %s (re-running dev agents)",
+                round_num, score.weighted_avg, score.strategy.upper(),
+            )
+
+            if round_num == MAX_EVALUATOR_ROUNDS:
+                logger.warning("  ⚠ Max evaluator rounds reached — proceeding to QA anyway")
+                break
+
+            # Re-run dev agents — evaluator feedback delivered via state.evaluator_score
+            # which _build_project_context() injects into every agent prompt automatically
+            logger.info("  ▶ Re-running frontend+backend with evaluator feedback...")
+            results = run_parallel(["frontend", "backend"], state)
+            for agent_id, update, error in results:
+                if error:
+                    logger.error("    ✗ %s re-run FAILED: %s", agent_id, error)
+                    errors_encountered.append((f"evaluator_rerun_{agent_id}", str(error)))
+                else:
+                    state = apply_state_update(state, update)
+                    logger.info("    ✓ %s re-run complete", agent_id)
+
+        except Exception as exc:
+            logger.warning("  ⚠ Evaluator agent error: %s — skipping evaluation", exc)
+            errors_encountered.append(("evaluator", str(exc)))
+            break
+
+    return state
+
+
+# ============================================================================
+# Post-Phase Observer helper
+# ============================================================================
+
+def _store_phase_observations(phase: str, state: AgentState) -> None:
+    """Run 3 Observer Agents and store extracted facts to memory (non-blocking).
+
+    Runs in a background thread so it does not slow down the main workflow.
+
+    Args:
+        phase: Phase name that just completed.
+        state: Current AgentState.
+    """
+    import threading
+    from memory.memory_manager import get_memory_manager
+
+    def _background() -> None:
+        try:
+            outputs = run_observer_agents_parallel(phase=phase, state=state)
+            manager = get_memory_manager()
+            for output in outputs:
+                manager.store_observer_output(output)
+            total = sum(len(o.facts) for o in outputs)
+            logger.debug("Observer (%s): stored %d facts to memory", phase, total)
+        except Exception as exc:
+            logger.debug("Observer (%s) background error: %s", phase, exc)
+
+    thread = threading.Thread(target=_background, daemon=True, name=f"observer-{phase}")
+    thread.start()
+
+
+# ============================================================================
 # Main runner
 # ============================================================================
 
@@ -514,7 +674,8 @@ def run_workflow(user_request: str) -> AgentState:
     Execute a full multi-agent workflow for the given user request.
 
     Flow:
-        Planning → Architecture → Frontend+Backend (parallel)
+        [Phase 0] Brainstorming (6 parallel domain perspectives) → Synthesis
+        → Planning → Architecture → Frontend+Backend (parallel)
         → QA → [self-healing loop if needed] → Documentation
 
     Returns:
@@ -536,6 +697,72 @@ def run_workflow(user_request: str) -> AgentState:
     total_start = time.time()
     errors_encountered = []
 
+    # ── Pre-Run: Memory Search (3 parallel Search Agents) ─────────────────────
+    if MEMORY_ENABLED and state.memory_context is None:
+        logger.info("▶ Building pre-run memory context from past runs...")
+        try:
+            project_type = _infer_project_type(state)
+            tech_stack = _extract_tech_stack(state)
+            memory_ctx = run_search_agents_parallel(
+                user_request=user_request,
+                project_type=project_type,
+                tech_stack=tech_stack,
+            )
+            state.memory_context = memory_ctx
+            if not memory_ctx.is_empty():
+                logger.info(
+                    "  ✓ Memory: %d bug patterns, %d success patterns, %d warnings loaded",
+                    len(memory_ctx.known_bug_patterns),
+                    len(memory_ctx.successful_patterns),
+                    len(memory_ctx.warning_flags),
+                )
+            else:
+                logger.info("  ℹ Memory: no relevant past runs found (first run for this project type)")
+        except Exception as exc:
+            logger.warning("  ⚠ Memory search failed: %s — continuing without memory context", exc)
+
+    # ── Phase 0: Collective Brainstorming ─────────────────────────────────────
+    # Skip if we already have brainstorming results (resumed from checkpoint)
+    if not state.brainstorming_artifacts.collective_consensus:
+        logger.info(f"\n{'═'*60}")
+        logger.info("Phase 0: Collective Brainstorming (6 agents in parallel)")
+        logger.info(f"{'═'*60}")
+        t_brain = time.time()
+
+        # Run all 6 domain perspectives in parallel
+        brain_results = run_parallel(BRAINSTORMING_ROLES, state)
+        for agent_id, update, error in brain_results:
+            if error:
+                logger.warning(f"  ⚠ {agent_id} brainstorming FAILED: {error} — continuing without")
+                errors_encountered.append((agent_id, str(error)))
+            else:
+                state = _apply_brainstorming_perspective(state, agent_id, update)
+                logger.info(f"  ✓ {agent_id} perspective collected")
+
+        # Run synthesis (serial) — requires all perspectives to be in state
+        logger.info(f"  ▶ Running brainstorming synthesis")
+        try:
+            synthesis_update = execute_agent(BRAINSTORMING_SYNTHESIS_AGENT, state)
+            state = apply_state_update(state, synthesis_update)
+            elapsed_brain = time.time() - t_brain
+            logger.info(
+                f"✓ Brainstorming phase complete in {elapsed_brain:.1f}s — "
+                f"{len(state.brainstorming_artifacts.perspectives)} perspectives, "
+                f"tech stack: {state.brainstorming_artifacts.agreed_tech_stack}"
+            )
+            state.metadata.current_phase = AgentPhase.PLANNING
+            _save_checkpoint(state, project_id, "brainstorming_synthesis")
+        except Exception as exc:
+            elapsed_brain = time.time() - t_brain
+            logger.warning(
+                f"  ⚠ Brainstorming synthesis FAILED after {elapsed_brain:.1f}s: {exc} — "
+                f"continuing without collective consensus"
+            )
+            errors_encountered.append((BRAINSTORMING_SYNTHESIS_AGENT, str(exc)))
+    else:
+        logger.info("Phase 0: Brainstorming artifacts already present — skipping (resumed from checkpoint)")
+
+    # ── Phase 1-5: Main workflow ──────────────────────────────────────────────
     for step in WORKFLOW_ORDER:
         agents = [step] if isinstance(step, str) else step
 
@@ -547,7 +774,7 @@ def run_workflow(user_request: str) -> AgentState:
             t0 = time.time()
             try:
                 update = execute_agent(agent_id, state)
-                _validate_agent_output(agent_id, update, state)
+                _validate_agent_output(agent_id, update, state, errors_encountered)
                 state = apply_state_update(state, update)
                 elapsed = time.time() - t0
                 logger.info(f"✓ {agent_id} completed in {elapsed:.1f}s")
@@ -561,6 +788,9 @@ def run_workflow(user_request: str) -> AgentState:
                 # ── Self-healing after QA ─────────────────────────────
                 if agent_id == "qa":
                     state = run_healing_loop(state, errors_encountered)
+                    # Post-QA Observer (after healing loop completes)
+                    if MEMORY_ENABLED:
+                        _store_phase_observations("qa", state)
 
             except Exception as exc:
                 elapsed = time.time() - t0
@@ -602,7 +832,7 @@ def run_workflow(user_request: str) -> AgentState:
                     logger.error(f"  ✗ {agent_id} FAILED: {error}")
                     errors_encountered.append((agent_id, str(error)))
                 else:
-                    _validate_agent_output(agent_id, update, state)
+                    _validate_agent_output(agent_id, update, state, errors_encountered)
                     state = apply_state_update(state, update)
                     _save_checkpoint(state, project_id, agent_id)
                     if state.messages:
@@ -621,6 +851,13 @@ def run_workflow(user_request: str) -> AgentState:
                     )
                 else:
                     logger.info("  ✓ API contracts validated — no mismatches")
+
+                # ── Evaluator Loop (before QA) ────────────────────────
+                state = _run_evaluator_loop(state, errors_encountered)
+
+                # ── Post-Phase Observer (async, non-blocking) ─────────
+                if MEMORY_ENABLED:
+                    _store_phase_observations("frontend+backend", state)
 
     # ── Final summary ────────────────────────────────────────────────────
     total_elapsed = time.time() - total_start
