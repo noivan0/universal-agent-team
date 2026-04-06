@@ -17,6 +17,7 @@ Usage:
 """
 
 import concurrent.futures
+import json
 import logging
 import os
 import sys
@@ -43,13 +44,14 @@ from state_models import (
 )
 from agent_executor import (
     execute_agent, AGENT_RUNNERS, _filter_bugs,
-    run_evaluator_agent, run_observer_agents_parallel, run_search_agents_parallel,
+    run_evaluator_agent, run_adversarial_agent,
+    run_observer_agents_parallel, run_search_agents_parallel,
     _infer_project_type, _extract_tech_stack,
 )
 from agent_bus import reset_bus, get_bus, ContractValidator
 from agent_validators import AgentOutputValidator
 from checkpoint_manager import CheckpointManager, ExecutionCheckpoint, migrate_state
-from config.constants import MEMORY_ENABLED, MAX_EVALUATOR_ROUNDS, EVALUATOR_THRESHOLD
+from config.constants import MEMORY_ENABLED, MAX_EVALUATOR_ROUNDS, EVALUATOR_THRESHOLD, ADVERSARIAL_ENABLED
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -190,7 +192,7 @@ def _save_checkpoint(state: AgentState, project_id: str, agent_id: str) -> None:
             project_id=project_id,
             agent_id=agent_id,
             checkpoint_id=f"post_{agent_id}",
-            state_snapshot=state.model_dump(),
+            state_snapshot=json.loads(state.model_dump_json()),
             progress=100,
             is_complete=True,
         )
@@ -306,6 +308,13 @@ def _qa_needs_healing(state: AgentState) -> Tuple[bool, List, List[str]]:
             affected = ["frontend", "backend"]
         # Only heal dev agents (not planning/architecture/qa/documentation)
         affected = [a for a in affected if a in ("frontend", "backend")]
+        # Don't re-heal frontend if tsc was passing — healing would regress working code
+        frontend_result = str(tr.get("real_frontend_result", ""))
+        if "tsc: PASS" in frontend_result and "frontend" in affected:
+            affected = [a for a in affected if a != "frontend"]
+            logger.info("[Healing] frontend tsc PASS — excluding frontend from healing")
+        if not affected:
+            return False, [], []
         return True, bug_reports, affected
 
     return False, [], []
@@ -784,6 +793,20 @@ def run_workflow(user_request: str) -> AgentState:
 
                 # Save checkpoint so we can resume if interrupted later
                 _save_checkpoint(state, project_id, agent_id)
+
+                # ── Adversarial review after architecture ─────────────
+                if agent_id == "architecture" and ADVERSARIAL_ENABLED:
+                    logger.info("  ▶ Running Adversarial Agent (pre-dev risk review)")
+                    try:
+                        critique = run_adversarial_agent(state)
+                        if critique:
+                            state.adversarial_critique = critique
+                            logger.info("  ✓ Adversarial review complete — critique injected into dev context")
+                        else:
+                            logger.info("  ✓ Adversarial review: no issues found")
+                    except Exception as adv_exc:
+                        logger.warning("  ⚠ Adversarial agent failed: %s — continuing", adv_exc)
+                        errors_encountered.append(("adversarial", str(adv_exc)))
 
                 # ── Self-healing after QA ─────────────────────────────
                 if agent_id == "qa":

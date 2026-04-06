@@ -277,6 +277,50 @@ EVALUATOR_MIN_SCORE_PER_CRITERION: float = 4.0
 
 
 # ============================================================================
+# Extended Thinking Configuration
+# ============================================================================
+
+THINKING_BUDGET_EVALUATOR: int = 0
+"""Token budget for extended thinking in Evaluator Agent.
+Set to 0 (disabled) — enterprise proxy environments typically have lower token limits
+that cause JSON truncation when thinking consumes the output budget.
+Re-enable by setting to 3000-5000 if your API endpoint supports extended thinking."""
+
+THINKING_BUDGET_ARCHITECTURE: int = 0
+"""Token budget for extended thinking in Architecture Agent.
+Set to 0 (disabled) — same reason as THINKING_BUDGET_EVALUATOR.
+Re-enable by setting to 5000-8000 if your API endpoint supports extended thinking."""
+
+
+# ============================================================================
+# Adversarial Agent Configuration
+# ============================================================================
+
+ADVERSARIAL_ENABLED: bool = True
+"""Whether to run the Adversarial Agent after architecture (pre-development review)."""
+
+ADVERSARIAL_MAX_TOKENS: int = 2048
+"""Max tokens for Adversarial Agent response."""
+
+ADVERSARIAL_TEMPERATURE: float = 0.3
+"""Temperature for Adversarial Agent."""
+
+
+# ============================================================================
+# Reflexion Loop Configuration
+# ============================================================================
+
+REFLEXION_ENABLED: bool = False
+"""Whether agents self-review their own output (adds ~30% tokens per agent)."""
+
+REFLEXION_MAX_TOKENS: int = 4096
+"""Max tokens for reflexion self-review pass."""
+
+REFLEXION_TEMPERATURE: float = 0.2
+"""Temperature for reflexion self-review (low — focused correction)."""
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 

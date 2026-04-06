@@ -100,6 +100,10 @@ def _build_project_context(state: AgentState) -> str:
         if memory_section:
             lines.append(f"\n{memory_section}")
 
+    # Inject adversarial critique (arch weaknesses found before dev phase)
+    if state.adversarial_critique:
+        lines.append(f"\n## Architecture Risk Review (Adversarial Agent)\n{state.adversarial_critique}")
+
     # Inject evaluator feedback when dev agents are re-running after a failed evaluation
     if state.evaluator_score and not state.evaluator_score.passed:
         lines.append(f"\n{state.evaluator_score.to_dev_feedback()}")
@@ -129,7 +133,7 @@ Your ONLY job: analyse the user's project request and produce a structured proje
 OUTPUT: Respond with a single JSON object (no prose before or after):
 
 {
-  "requirements": "<markdown requirements document — comprehensive, 300-800 words>",
+  "requirements": "<requirements summary — concise bullet points, 80-150 words max>",
   "complexity_score": <integer 1-100>,
   "complexity_factors": ["<factor>", ...],
   "tasks": [
@@ -167,11 +171,15 @@ def run_planning_agent(state: AgentState, client: Optional[LLMClient] = None) ->
     response = client.call(
         system=PLANNING_SYSTEM,
         messages=[{"role": "user", "content": context}],
-        max_tokens=4096,
+        max_tokens=3000,
         temperature=0.3,
     )
 
-    data = client.extract_json(response)
+    raw_json = _reflexion_self_review("Planning Agent", response.content, context, client)
+    data = client.extract_json(LLMResponse(
+        content=raw_json, model_used=response.model_used,
+        input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+    ))
     logger.info(
         f"[Planning] Done. Complexity={data.get('complexity_score')}, "
         f"Tasks={len(data.get('tasks', []))}, "
@@ -210,10 +218,9 @@ ARCHITECTURE_SYSTEM = """You are the Architecture Agent in a multi-agent softwar
 
 Your ONLY job: design the system architecture based on the project requirements.
 
-OUTPUT: Respond with a single JSON object only:
+OUTPUT: Respond with a single JSON object only. Write fields IN THIS EXACT ORDER:
 
 {
-  "system_design": "<markdown architecture description — 400-800 words>",
   "component_specs": {
     "<ComponentName>": {
       "name": "<ComponentName>",
@@ -233,19 +240,22 @@ OUTPUT: Respond with a single JSON object only:
       "authentication_required": true|false
     }
   },
-  "database_schema": "<markdown ER diagram or table descriptions>",
+  "database_schema": "<table names, key columns, relationships — 3-5 lines>",
   "technology_decisions": {
     "frontend_framework": "<name>",
     "backend_framework": "<name>",
     "database": "<name>",
-    "rationale": "<why these choices>"
+    "rationale": "<1-2 sentences>"
   },
-  "summary": "<2-3 sentence summary>"
+  "summary": "<2-3 sentence summary>",
+  "system_design": "<architecture overview — 150-250 words>"
 }
 
 Rules:
-- api_specs keys must be unique (use pattern: resource-action e.g. todos-list, todos-create)
+- component_specs: 3-6 components max
+- api_specs keys must be unique (pattern: resource-action e.g. todos-list, todos-create); 4-8 endpoints max
 - Each api_spec path must start with /
+- Keep all text fields concise — token budget is limited
 - Do NOT write implementation code. Design only.
 - Response MUST be valid JSON only."""
 
@@ -262,14 +272,20 @@ def run_architecture_agent(state: AgentState, client: Optional[LLMClient] = None
             if isinstance(t, dict):
                 context += f"- [{t.get('task_id','')}] {t.get('title','')}: {t.get('description','')}\n"
 
+    from config.constants import THINKING_BUDGET_ARCHITECTURE
     response = client.call(
         system=ARCHITECTURE_SYSTEM,
         messages=[{"role": "user", "content": context}],
-        max_tokens=6144,
+        max_tokens=4096,
         temperature=0.2,
+        thinking_budget_tokens=THINKING_BUDGET_ARCHITECTURE,
     )
 
-    data = client.extract_json(response)
+    raw_json = _reflexion_self_review("Architecture Agent", response.content, context, client)
+    data = client.extract_json(LLMResponse(
+        content=raw_json, model_used=response.model_used,
+        input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+    ))
 
     # Convert raw dicts to typed ComponentSpec / APIEndpoint
     component_specs: Dict[str, ComponentSpec] = {}
@@ -1087,7 +1103,7 @@ def run_brainstorming_agent(
 
     logger.info(f"[Brainstorming] Running {perspective_role} perspective")
 
-    response: LLMResponse = client.complete(
+    response: LLMResponse = client.call(
         system=system_prompt,
         messages=[{"role": "user", "content": user_msg}],
         max_tokens=2048,
@@ -1173,7 +1189,7 @@ def run_synthesis_agent(
 
     logger.info(f"[Brainstorming] Running synthesis over {len(perspectives)} perspectives")
 
-    response: LLMResponse = client.complete(
+    response: LLMResponse = client.call(
         system=BRAINSTORMING_SYNTHESIS_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
         max_tokens=3000,
@@ -1239,6 +1255,8 @@ AGENT_RUNNERS = {
     "qa":            run_qa_agent,
     "documentation": run_documentation_agent,
 }
+# Note: adversarial agent is invoked directly via run_adversarial_agent()
+# (not dispatched through execute_agent) since it returns a string, not StateUpdate.
 
 
 def execute_agent(
@@ -1354,11 +1372,11 @@ def run_observer_agent(
     try:
         resp = client.call(
             system=_OBSERVER_SYSTEM,
-            user=user_msg,
+            messages=[{"role": "user", "content": user_msg}],
             max_tokens=OBSERVER_MAX_TOKENS,
             temperature=OBSERVER_TEMPERATURE,
         )
-        data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+        data = client.extract_json(resp)
     except Exception as e:
         logger.warning("Observer agent (%s/%s) failed: %s", phase, observer_type, e)
         return ObserverOutput(observer_type=observer_type, phase=phase)
@@ -1573,11 +1591,11 @@ def run_search_agents_parallel(
         try:
             resp = client.call(
                 system=_SEARCH_SYSTEM,
-                user=user_msg,
+                messages=[{"role": "user", "content": user_msg}],
                 max_tokens=MEMORY_SEARCH_MAX_TOKENS,
                 temperature=MEMORY_SEARCH_TEMPERATURE,
             )
-            data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+            data = client.extract_json(resp)
             return data.get("synthesis", "")
         except Exception as e:
             logger.warning("Search agent (%s) LLM call failed: %s", focus, e)
@@ -1729,14 +1747,16 @@ def run_evaluator_agent(
 
     user_msg = "\n".join(user_msg_parts)
 
+    from config.constants import THINKING_BUDGET_EVALUATOR
     try:
         resp = client.call(
             system=_EVALUATOR_SYSTEM,
-            user=user_msg,
+            messages=[{"role": "user", "content": user_msg}],
             max_tokens=EVALUATOR_MAX_TOKENS,
             temperature=EVALUATOR_TEMPERATURE,
+            thinking_budget_tokens=THINKING_BUDGET_EVALUATOR,
         )
-        data = json.loads(resp.content) if isinstance(resp.content, str) else resp.content
+        data = client.extract_json(resp)
     except Exception as e:
         logger.error("Evaluator agent failed: %s", e)
         return EvaluatorScore(
@@ -1792,3 +1812,200 @@ def run_evaluator_agent(
         "PASS" if overall_passed else "FAIL",
     )
     return score
+
+
+# ============================================================================
+# Adversarial Agent — pre-development architecture risk review
+# ============================================================================
+
+_ADVERSARIAL_SYSTEM = """You are the Adversarial Agent — a devil's advocate reviewer
+in a multi-agent software development system.
+
+You run AFTER architecture design and BEFORE developers write any code.
+Your job: find every way the proposed architecture can fail, be incomplete, or
+cause impossible implementation scenarios. Be blunt. Be specific. Be useful.
+
+Focus on:
+1. Missing endpoints — "Login exists but where is logout? Password reset?"
+2. Impossible FE requirements — "Dashboard shows real-time data but no WebSocket endpoint"
+3. N+1 / performance traps — schema design that will break under load
+4. Auth gaps — routes that need auth but spec doesn't define auth mechanism
+5. Schema mismatches — FE component expects fields not in API response schema
+6. Missing error states — API spec defines happy path only, no 4xx/5xx handling defined
+
+OUTPUT: Respond with a single JSON object (no prose):
+
+{
+  "critical_issues": [
+    {
+      "category": "<missing_endpoint|impossible_requirement|schema_mismatch|auth_gap|performance_trap|missing_error_handling>",
+      "description": "<specific, actionable description of the problem>",
+      "impact": "<what breaks if this is ignored>",
+      "suggestion": "<concrete fix the dev agents should apply>"
+    }
+  ],
+  "warnings": ["<minor issues worth noting>"],
+  "overall_risk": "<low|medium|high>",
+  "summary": "<2-3 sentences: what must be fixed before coding starts>"
+}
+
+Rules:
+- critical_issues: minimum 1, maximum 8 (only real problems, not nitpicks)
+- Be specific: reference actual component names and endpoint paths from the spec
+- Do NOT invent requirements not in the spec — only critique what IS there
+- Response MUST be valid JSON only."""
+
+
+def run_adversarial_agent(
+    state: AgentState,
+    client: Optional[LLMClient] = None,
+) -> str:
+    """Run the Adversarial Agent against the architecture spec.
+
+    Finds weaknesses, gaps, and impossible requirements before dev agents start.
+
+    Args:
+        state: Current workflow state (must have architecture_artifacts).
+        client: Optional LLM client.
+
+    Returns:
+        Critique string to inject into dev agent context via state.adversarial_critique.
+        Returns empty string if architecture artifacts are missing or agent fails.
+    """
+    from config.constants import ADVERSARIAL_MAX_TOKENS, ADVERSARIAL_TEMPERATURE
+
+    if client is None:
+        client = get_client()
+
+    arch = state.architecture_artifacts
+    if not arch.system_design and not arch.component_specs and not arch.api_specs:
+        logger.debug("Adversarial: no architecture artifacts — skipping")
+        return ""
+
+    # Build architecture summary for review
+    spec_lines = []
+    if arch.system_design:
+        spec_lines.append(f"## System Design\n{arch.system_design[:1500]}")
+    if arch.component_specs:
+        spec_lines.append(f"\n## Frontend Components\n" + "\n".join(
+            f"- {name}: props={list(spec.props.keys())}, api_calls={spec.api_calls}"
+            for name, spec in arch.component_specs.items()
+        ))
+    if arch.api_specs:
+        spec_lines.append(f"\n## API Endpoints\n" + "\n".join(
+            f"- {ep.method} {ep.path}: auth={ep.authentication_required}, "
+            f"req={list(ep.request_schema.keys())}, resp={list(ep.response_schema.keys())}"
+            for ep in arch.api_specs.values()
+        ))
+    if arch.database_schema:
+        spec_lines.append(f"\n## Database Schema\n{arch.database_schema[:800]}")
+
+    user_request = state.metadata.user_request
+    user_msg = (
+        f"User Request: {user_request}\n\n"
+        f"=== ARCHITECTURE SPEC TO REVIEW ===\n"
+        + "\n".join(spec_lines)
+    )
+
+    try:
+        resp = client.call(
+            system=_ADVERSARIAL_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=ADVERSARIAL_MAX_TOKENS,
+            temperature=ADVERSARIAL_TEMPERATURE,
+        )
+        data = client.extract_json(resp)
+    except Exception as exc:
+        logger.warning("Adversarial agent failed: %s — skipping pre-dev review", exc)
+        return ""
+
+    # Format critique for injection into dev agent prompts
+    critical = data.get("critical_issues", [])
+    warnings = data.get("warnings", [])
+    overall_risk = data.get("overall_risk", "unknown")
+    summary = data.get("summary", "")
+
+    lines = [
+        f"**Overall Risk: {overall_risk.upper()}** — {summary}",
+        "",
+    ]
+    if critical:
+        lines.append("### Critical Issues (MUST fix during implementation):")
+        for issue in critical:
+            cat = issue.get("category", "unknown")
+            desc = issue.get("description", "")
+            suggestion = issue.get("suggestion", "")
+            lines.append(f"- [{cat}] {desc}")
+            if suggestion:
+                lines.append(f"  → Fix: {suggestion}")
+    if warnings:
+        lines.append("\n### Warnings:")
+        for w in warnings:
+            lines.append(f"- {w}")
+
+    critique = "\n".join(lines)
+    logger.info(
+        "Adversarial review: risk=%s, %d critical issues, %d warnings",
+        overall_risk, len(critical), len(warnings),
+    )
+    return critique
+
+
+# ============================================================================
+# Reflexion — agent self-review pass
+# ============================================================================
+
+def _reflexion_self_review(
+    agent_role: str,
+    original_json: str,
+    context: str,
+    client: LLMClient,
+) -> str:
+    """Run a second LLM pass where the agent reviews and corrects its own output.
+
+    Args:
+        agent_role: Human-readable agent name (e.g. "Planning Agent").
+        original_json: The JSON string the agent produced in its first pass.
+        context: The original user context given to the agent.
+        client: LLM client to use.
+
+    Returns:
+        Corrected JSON string (or original if reflexion fails / is disabled).
+    """
+    from config.constants import REFLEXION_ENABLED, REFLEXION_MAX_TOKENS, REFLEXION_TEMPERATURE
+
+    if not REFLEXION_ENABLED:
+        return original_json
+
+    system = (
+        f"You are the {agent_role} reviewing your own previous output.\n\n"
+        "Look for:\n"
+        "1. Missing required fields or empty arrays that should have content\n"
+        "2. Inconsistencies between different parts of the output\n"
+        "3. Items mentioned in the context that were not addressed\n"
+        "4. Unrealistic values (e.g. complexity score too high/low for the request)\n\n"
+        "OUTPUT: Return the corrected JSON only. If no corrections are needed, "
+        "return the original JSON unchanged. No prose."
+    )
+    review_msg = (
+        f"Original context:\n{context[:1000]}\n\n"
+        f"Your previous output:\n{original_json[:3000]}\n\n"
+        "Review and correct the above JSON output."
+    )
+
+    try:
+        resp = client.call(
+            system=system,
+            messages=[{"role": "user", "content": review_msg}],
+            max_tokens=REFLEXION_MAX_TOKENS,
+            temperature=REFLEXION_TEMPERATURE,
+        )
+        corrected = resp.content.strip()
+        # Validate it's still JSON before accepting
+        import json as _json
+        _json.loads(corrected) if corrected.startswith("{") else corrected
+        logger.debug("[Reflexion] %s: self-review complete", agent_role)
+        return corrected
+    except Exception as exc:
+        logger.debug("[Reflexion] %s: self-review failed (%s) — using original", agent_role, exc)
+        return original_json

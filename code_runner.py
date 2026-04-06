@@ -69,6 +69,8 @@ _STDLIB: frozenset = frozenset({
     "subprocess", "socket", "ssl", "http", "urllib", "email",
     "__future__", "importlib", "types", "builtins", "configparser",
     "argparse", "unittest", "csv", "xml", "html", "decimal", "fractions",
+    # Python 3.12+ soft keywords / common false positives
+    "type", "annotations", "protocol", "runtime", "final",
 })
 
 PROC_TIMEOUT = 120  # seconds
@@ -481,7 +483,7 @@ class FrontendCodeRunner:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
 
-        # Write package.json
+        # Write package.json — include common libraries generated code may use
         package_json = {
             "name": "generated-frontend",
             "version": "1.0.0",
@@ -491,6 +493,8 @@ class FrontendCodeRunner:
                 "react-dom": "^18.0.0",
                 "react-router-dom": "^6.0.0",
                 "axios": "^1.0.0",
+                "@tanstack/react-query": "^5.0.0",
+                "zustand": "^4.0.0",
             },
             "devDependencies": {
                 "typescript": "^5.0.0",
@@ -510,6 +514,7 @@ class FrontendCodeRunner:
                 "jsx": "react-jsx",
                 "module": "ESNext",
                 "moduleResolution": "node",
+                "ignoreDeprecations": "5.0",  # suppress node/node10 deprecation in tsc 6+
                 "strict": False,
                 "skipLibCheck": True,
                 "noEmit": True,

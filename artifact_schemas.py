@@ -126,8 +126,8 @@ class ArchitectureAgentOutput(BaseModel):
         default=None,
         description="Design system / UI guidelines"
     )
-    deployment_templates: Dict[str, str] = Field(
-        default_factory=dict,
+    deployment_templates: Optional[Dict[str, str]] = Field(
+        default=None,
         description="Docker, Kubernetes, etc. templates {file_path: content}"
     )
     technology_decisions: Dict[str, Any] = Field(
@@ -146,9 +146,13 @@ class ArchitectureAgentOutput(BaseModel):
     @field_validator("api_specs")
     @classmethod
     def validate_api_specs(cls, v):
-        for path, endpoint in v.items():
-            if not path.startswith("/"):
-                raise ValueError(f"API path must start with /: {path}")
+        for key, endpoint in v.items():
+            # Check the endpoint's path field, not the dict key (key is a label like "todos-list")
+            ep_path = endpoint.path if hasattr(endpoint, "path") else (
+                endpoint.get("path", "") if isinstance(endpoint, dict) else ""
+            )
+            if ep_path and not ep_path.startswith("/"):
+                raise ValueError(f"API path must start with /: {ep_path}")
         return v
 
 
@@ -174,12 +178,12 @@ class DevelopmentAgentOutput(BaseModel):
         ...,
         description="Generated code files {file_path: content}"
     )
-    language: str = Field(
-        ...,
+    language: Optional[str] = Field(
+        default=None,
         description="Primary language (typescript, python, etc.)"
     )
-    framework: str = Field(
-        ...,
+    framework: Optional[str] = Field(
+        default=None,
         description="Primary framework (react, fastapi, etc.)"
     )
     dependencies: List[str] = Field(
@@ -267,25 +271,30 @@ class QAAgentOutput(BaseModel):
     """
     Schema for QA Agent output.
 
-    Expected artifact structure when QA Agent completes.
+    Uses Dict[str, Any] for test_results because the QA agent returns a flat
+    dict {total, passed, failed, coverage, real_frontend_result, ...}, not
+    the original grouped-by-suite format.
     """
-    test_results: Dict[str, List[TestResult]] = Field(
+    test_results: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Test results by test suite {suite_name: [test_results]}"
+        description="Test results flat dict {total, passed, failed, coverage, ...}"
     )
     total_tests: int = 0
     passed_tests: int = 0
     failed_tests: int = 0
     coverage_percent: float = Field(default=0.0, ge=0.0, le=100.0)
-    coverage_report: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Detailed coverage report"
+    coverage_report: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Detailed coverage report (optional)"
     )
     bug_reports: List[BugReport] = Field(
         default_factory=list,
         description="Bugs found during testing"
     )
-    error_analysis: Optional[ErrorAnalysis] = None
+    error_analysis: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Error analysis dict (root_causes, affected_agents, restart_needed, ...)"
+    )
     restart_plan: Optional[RestartPlan] = None
     summary: str = Field(
         default="",

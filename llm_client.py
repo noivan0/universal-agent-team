@@ -24,8 +24,8 @@ import anthropic
 # Constants
 # ============================================================================
 
-PRIMARY_MODEL   = "claude-opus-4-6"
-FALLBACK_MODEL  = "claude-sonnet-4-6"
+PRIMARY_MODEL   = "claude-sonnet-4-6"
+FALLBACK_MODEL  = "claude-haiku-4-5"
 
 MAX_TOKENS_DEFAULT = 8192
 TEMPERATURE_DEFAULT = 0.3
@@ -75,8 +75,8 @@ class CircuitState:
 
 
 _circuits: Dict[str, CircuitState] = {
-    PRIMARY_MODEL:  CircuitState(),
-    FALLBACK_MODEL: CircuitState(),
+    PRIMARY_MODEL:  CircuitState(),   # claude-sonnet-4-6
+    FALLBACK_MODEL: CircuitState(),   # claude-haiku-4-5
 }
 
 
@@ -156,6 +156,7 @@ class LLMClient:
         messages: List[Dict[str, str]],
         max_tokens: int = MAX_TOKENS_DEFAULT,
         temperature: float = TEMPERATURE_DEFAULT,
+        thinking_budget_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """
         Call the LLM with automatic retry and model fallback.
@@ -169,6 +170,9 @@ class LLMClient:
             messages: Conversation messages list
             max_tokens: Max output tokens
             temperature: Sampling temperature
+            thinking_budget_tokens: If set, enables extended thinking with this token budget.
+                Forces temperature=1 as required by the API. max_tokens is automatically
+                increased to budget+4096 if it would otherwise be too small.
 
         Returns:
             LLMResponse with content and usage stats
@@ -180,7 +184,8 @@ class LLMClient:
         if not _circuits[PRIMARY_MODEL].is_open:
             try:
                 resp = self._call_with_retry(
-                    PRIMARY_MODEL, system, messages, max_tokens, temperature
+                    PRIMARY_MODEL, system, messages, max_tokens, temperature,
+                    thinking_budget_tokens,
                 )
                 _circuits[PRIMARY_MODEL].record_success()
                 return resp
@@ -204,7 +209,8 @@ class LLMClient:
 
         try:
             resp = self._call_with_retry(
-                FALLBACK_MODEL, system, messages, max_tokens, temperature
+                FALLBACK_MODEL, system, messages, max_tokens, temperature,
+                thinking_budget_tokens,
             )
             _circuits[FALLBACK_MODEL].record_success()
             resp.used_fallback = True
@@ -314,6 +320,7 @@ class LLMClient:
         messages: List[Dict[str, str]],
         max_tokens: int,
         temperature: float,
+        thinking_budget_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Retry up to MAX_RETRIES times with exponential backoff."""
         last_exc: Optional[Exception] = None
@@ -322,15 +329,50 @@ class LLMClient:
             try:
                 self.logger.debug(
                     f"[{model}] Attempt {attempt + 1}/{MAX_RETRIES}"
+                    + (" [thinking]" if thinking_budget_tokens else "")
                 )
-                result = self._client.messages.create(
+
+                create_kwargs: Dict[str, Any] = dict(
                     model=model,
-                    max_tokens=max_tokens,
                     system=system,
                     messages=messages,
                 )
+
+                if thinking_budget_tokens:
+                    # Extended thinking: temperature must be 1; max_tokens must exceed budget
+                    if temperature != 1.0:
+                        self.logger.debug(
+                            f"[{model}] Extended thinking requires temperature=1 "
+                            f"(overriding {temperature})"
+                        )
+                    create_kwargs["temperature"] = 1
+                    create_kwargs["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": thinking_budget_tokens,
+                    }
+                    # API requires max_tokens > budget_tokens
+                    create_kwargs["max_tokens"] = max(
+                        max_tokens, thinking_budget_tokens + 4096
+                    )
+                else:
+                    create_kwargs["temperature"] = temperature
+                    create_kwargs["max_tokens"] = max_tokens
+
+                result = self._client.messages.create(**create_kwargs)
+
+                # Extract text content (skip thinking blocks when present)
+                if thinking_budget_tokens:
+                    text_parts = [
+                        block.text
+                        for block in result.content
+                        if getattr(block, "type", "") == "text"
+                    ]
+                    content = "\n".join(text_parts) if text_parts else ""
+                else:
+                    content = result.content[0].text
+
                 return LLMResponse(
-                    content=result.content[0].text,
+                    content=content,
                     model_used=model,
                     input_tokens=result.usage.input_tokens,
                     output_tokens=result.usage.output_tokens,
@@ -360,8 +402,18 @@ class LLMClient:
                     )
                     time.sleep(wait)
                     last_exc = exc
+                elif exc.status_code == 400 and thinking_budget_tokens:
+                    # Extended thinking not supported by this model/endpoint —
+                    # disable thinking and retry immediately with the same model.
+                    self.logger.warning(
+                        f"[{model}] Extended thinking not supported (400) — "
+                        f"retrying without thinking"
+                    )
+                    thinking_budget_tokens = None
+                    last_exc = exc
+                    # continue to next iteration without sleep
                 else:
-                    raise  # 4xx errors are not retriable
+                    raise  # other 4xx errors are not retriable
             except Exception as exc:
                 last_exc = exc
                 if attempt < MAX_RETRIES - 1:

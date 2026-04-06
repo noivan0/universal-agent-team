@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Literal, Union
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from artifact_schemas import ComponentSpec, APIEndpoint
 from memory.models import MemoryContext
@@ -374,6 +374,9 @@ class AgentState(BaseModel):
     evaluator_score: Optional["EvaluatorScore"] = None
     """Most recent Evaluator Agent score (set after dev phase, before QA)."""
 
+    adversarial_critique: Optional[str] = None
+    """Adversarial Agent findings injected before dev agents (set after architecture)."""
+
     # ====== Human Interaction ======
     requires_human_approval: bool = False
     approval_reason: Optional[str] = None
@@ -381,6 +384,14 @@ class AgentState(BaseModel):
     is_complete: bool = False
 
     # ====== Convenience Methods ======
+
+    @field_serializer('messages')
+    def _serialize_messages(self, v) -> list:
+        return list(v)
+
+    @field_serializer('errors')
+    def _serialize_errors(self, v) -> list:
+        return list(v)
 
     def add_message(self, message: AgentMessage):
         """Add a message to the communication history with size check."""
